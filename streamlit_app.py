@@ -140,13 +140,14 @@ def kodu_ayikla(sorgu):
     return max(adaylar, key=len) if adaylar else ""
 
 
-def sayfayi_dogrula(html, kod):
-    """Urun kodu sayfada geciyor mu?
+def sayfayi_dogrula(html, kod, marka=""):
+    """Sayfa gercekten bu urune mi ait?
 
-    'tam'   - kodun tamami geciyor (212481-410)
-    'kismi' - sadece ana govdesi geciyor (212481). Renk/beden ayri yazilmis
-              olabilir; bu sayfalar genelde dogru urundur.
-    'yok'   - kod hic gecmiyor. Buyuk ihtimalle alakasiz sayfa.
+    'tam'   - kodun tamami geciyor
+    'kismi' - kodun buyuk bolumu geciyor (site farkli bolmus olabilir)
+    'zayif' - kodun govdesi geciyor; ayni model, rengi farkli olabilir
+    'marka' - koddan iz yok ama marka adi geciyor
+    'yok'   - ne kod ne marka geciyor. Sayfanin urunle alakasi yok, kullanilmaz.
     """
     if not kod:
         return "kismi"
@@ -177,6 +178,13 @@ def sayfayi_dogrula(html, kod):
     kisa_ek = max(6, int(uzunluk * 0.55))
     if uzunluk > kisa_ek and sade_kod[:kisa_ek] in sade_sayfa:
         return "zayif"
+
+    # 5) Koddan hicbir iz yok. Hic olmazsa marka adi geciyor mu?
+    #    Gecmiyorsa bu sayfanin urunle alakasi yoktur (arama motoru uzun
+    #    alfanumerik kodlarda alakasiz sayfalar getirebiliyor).
+    sade_marka = _sadelestir(marka)
+    if sade_marka and len(sade_marka) >= 3 and sade_marka in sade_sayfa:
+        return "marka"
 
     return "yok"
 
@@ -302,7 +310,7 @@ def sayfa_bilgileri(corba, sayfa_url):
     return bilgi
 
 
-def sayfa_gorselleri(sayfa_url, oturum, kod=""):
+def sayfa_gorselleri(sayfa_url, oturum, kod="", marka=""):
     """Sayfadaki gorselleri, kod dogrulamasini ve urun bilgilerini dondurur."""
     try:
         cevap = oturum.get(sayfa_url, timeout=15)
@@ -312,7 +320,7 @@ def sayfa_gorselleri(sayfa_url, oturum, kod=""):
     if "text/html" not in cevap.headers.get("Content-Type", ""):
         return [], "yok", {}
 
-    dogrulama = sayfayi_dogrula(cevap.text, kod)
+    dogrulama = sayfayi_dogrula(cevap.text, kod, marka)
     corba = BeautifulSoup(cevap.text, "html.parser")
     # Bilgi cikarimi sayfanin yapisina bagli; beklenmedik bir bicim gelirse
     # gorselleri kaybetmemek icin sadece bilgiyi bos gecip devam ediyoruz.
@@ -502,13 +510,16 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     if not aday_sayfalar:
         return [], [], "ürün sayfası bulunamadı", kullanilan_sorgu
 
+    # "yok" hicbir modda kabul edilmez: o sayfada ne urun kodu ne marka adi
+    # geciyor demektir, urunle alakasi yoktur. Arama motoru uzun kodlarda
+    # bambaska sayfalar getirebiliyor; buradan geri donuyoruz.
     KADEMELER = {"siki": {"tam"},
                  "orta": {"tam", "kismi"},
-                 "gevsek": {"tam", "kismi", "zayif", "yok"}}
+                 "gevsek": {"tam", "kismi", "zayif", "marka"}}
     kabul = KADEMELER[katilik]
     # Linki kullanici verdiyse dogrulamaya gerek yok - sayfayi zaten o secti
     if link_verildi:
-        kabul = {"tam", "kismi", "zayif", "yok"}
+        kabul = {"tam", "kismi", "zayif", "marka", "yok"}
 
     imzalar, kayitlar, elenen = set(), [], []
     yedekler = []          # dogrulamayi gecemeyen ama gorsel iceren sayfalar
@@ -540,10 +551,14 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         # Cop sonuclar ilk siralari kaplasa bile gercek urun sayfasina ulasiriz.
         if kullanilan_site >= kac_site or len(kayitlar) >= kac_gorsel:
             break
-        adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod)
+        adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka)
         if dogrulama not in kabul:
             elenen.append(alan)
-            if adaylar and len(yedekler) < kac_site:
+            # Otomatik gevsetme yalnizca kodun izinin bulundugu sayfalara
+            # iner. Sadece marka adi gecen sayfa (koleksiyon listesi olabilir)
+            # ya da hicbir izi olmayan sayfa yedege alinmaz - kullanici
+            # isterse "Gevsek" secerek onlari acikca isteyebilir.
+            if adaylar and dogrulama in ("kismi", "zayif") and len(yedekler) < kac_site:
                 yedekler.append((alan, adres, adaylar, dogrulama, bilgi))
             continue
         kullanilan_site += 1
@@ -554,7 +569,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     # Kullaniciyi "ayari gevsetin" diye geri gondermek yerine kendimiz
     # gevsetip sonucu acikca etiketliyoruz.
     if not kayitlar and yedekler:
-        sira = {"tam": 0, "kismi": 1, "zayif": 2, "yok": 3}
+        sira = {"tam": 0, "kismi": 1, "zayif": 2, "marka": 3}
         for alan, adres, adaylar, dogrulama, bilgi in sorted(
                 yedekler, key=lambda y: sira.get(y[3], 9)):
             if len(kayitlar) >= kac_gorsel:
@@ -564,8 +579,9 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     kullanilan = sorted({k["alan"] for k in kayitlar})
     if not kayitlar:
         return [], kullanilan, (
-            f"{len(elenen)} sitede de ürün görseli bulunamadı — ürün sayfasının "
-            f"linkini doğrudan yapıştırmayı deneyin"), kullanilan_sorgu
+            f"bulunamadı — bakılan {len(elenen)} sayfanın hiçbirinde bu ürün "
+            f"kodu ya da marka adı geçmiyor. Google'da bulduğunuz ürün "
+            f"sayfasının linkini yapıştırın, oradan çeker."), kullanilan_sorgu
     return kayitlar, kullanilan, "", kullanilan_sorgu
 
 
@@ -823,7 +839,8 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
     tam = sum(1 for k in kayitlar if k.get("dogrulama") == "tam")
     kismi = sum(1 for k in kayitlar if k.get("dogrulama") == "kismi")
     zayif = sum(1 for k in kayitlar if k.get("dogrulama") == "zayif")
-    supheli = sum(1 for k in kayitlar if k.get("dogrulama") == "yok")
+    supheli = sum(1 for k in kayitlar
+                  if k.get("dogrulama") in ("marka", "yok"))
     dagilim = []
     if baglanti:
         dagilim.append(f"{baglanti} verdiğin linkten")
@@ -834,13 +851,18 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
     if zayif:
         dagilim.append(f"{zayif} aynı model")
     if supheli:
-        dagilim.append(f"{supheli} doğrulanmadı")
+        dagilim.append(f"{supheli} sadece marka eşleşti")
     st.caption(f"{len(kayitlar)} görsel · {' · '.join(dagilim)}")
-    if zayif or supheli:
+    if supheli:
         st.warning(
-            "Kodun tamamı hiçbir sayfada bulunamadı, bu yüzden eşleşme otomatik "
-            "gevşetildi. Aşağıdakiler doğru model olabilir ama **rengi farklı "
-            "olabilir** — ürün adını ve rengini kartta kontrol edin.")
+            "Aşağıdaki görsellerde ürün kodu **hiç geçmiyor**, sadece marka adı "
+            "eşleşti. Farklı bir ürün olabilir — kartta ürün adını mutlaka "
+            "kontrol edin.")
+    elif zayif:
+        st.warning(
+            "Kodun tamamı bulunamadı, aynı model ailesinden sayfalara inildi. "
+            "Doğru model ama **rengi farklı olabilir** — kartta ürün adını ve "
+            "rengini kontrol edin.")
 
     # Gorselleri geldikleri sayfaya gore grupluyoruz: her grubun basinda o
     # sayfanin urun bilgisi duruyor, ekip sadece gorsele bakip karar vermesin.
@@ -888,6 +910,7 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
                     rozet = {"tam": "✓ kod doğrulandı",
                              "kismi": "~ kısmi eşleşme",
                              "zayif": "⚠ aynı model, renk farklı olabilir",
+                             "marka": "⚠ sadece marka eşleşti",
                              "yok": "⚠ doğrulanmadı",
                              "link": "✓ verdiğin link"}.get(kayit.get("dogrulama"), "")
                     st.caption(f"**{kayit['alan']}**  \n"
