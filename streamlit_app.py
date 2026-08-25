@@ -10,6 +10,7 @@ Erisim ortak bir sifre ile korunur. Sifre kodun icinde degil, Streamlit'in
 import hashlib
 import hmac
 import io
+import json
 import re
 import time
 import zipfile
@@ -74,8 +75,15 @@ GURULTU = ("logo", "icon", "sprite", "banner", "placeholder", "avatar", "pixel",
            "instagram", "facebook", "whatsapp", "trustpilot", "kargo", "cargo",
            "favicon")
 
-ATLANACAK_ALAN = ("youtube.", "facebook.", "instagram.", "pinterest.", "tiktok.",
-                  "twitter.", "x.com", "reddit.", "aliexpress.", "wikipedia.")
+ATLANACAK_ALAN = (
+    # Sosyal medya - urun fotografi degil, paylasim var
+    "youtube.", "facebook.", "instagram.", "pinterest.", "tiktok.",
+    "twitter.", "x.com", "reddit.", "aliexpress.",
+    # Ansiklopedi, veri ve kurum siteleri. Uzun alfanumerik kodlarda arama
+    # motoru birebir eslesme bulamayinca bu tur sayfalari getiriyor.
+    "wikipedia.", "wikimedia.", ".gov", ".edu", "ac.uk", "ftp.", "ncbi.",
+    "ebi.ac.uk", "nasa.gov", "archive.org", "scribd.", "slideshare.",
+)
 
 UZANTI_TAMAM = (".jpg", ".jpeg", ".png", ".webp")
 
@@ -151,18 +159,125 @@ def sayfayi_dogrula(html, kod):
     return "yok"
 
 
+def _json_ld_urunler(corba):
+    """Sayfadaki yapisal veriden Product nesnelerini toplar."""
+    bulunanlar = []
+
+    def gez(dugum):
+        if isinstance(dugum, dict):
+            tur = dugum.get("@type", "")
+            turler = tur if isinstance(tur, list) else [tur]
+            if any("product" in str(t).lower() for t in turler):
+                bulunanlar.append(dugum)
+            for deger in dugum.values():
+                gez(deger)
+        elif isinstance(dugum, list):
+            for oge in dugum:
+                gez(oge)
+
+    for betik in corba.find_all("script", type="application/ld+json"):
+        try:
+            gez(json.loads(betik.get_text() or "{}"))
+        except Exception:
+            continue
+    return bulunanlar
+
+
+def _metin(deger):
+    """JSON-LD alanlari bazen metin, bazen nesne, bazen liste olarak gelir."""
+    if deger is None:
+        return ""
+    if isinstance(deger, str):
+        return deger.strip()
+    if isinstance(deger, (int, float)):
+        return str(deger)
+    if isinstance(deger, list):
+        return ", ".join(x for x in (_metin(d) for d in deger) if x)
+    if isinstance(deger, dict):
+        for anahtar in ("name", "value", "@value", "title"):
+            if deger.get(anahtar):
+                return _metin(deger[anahtar])
+    return ""
+
+
+def sayfa_bilgileri(corba, sayfa_url):
+    """Sayfadan urun adi, renk, fiyat gibi dogrulanabilir bilgileri cikarir.
+
+    Ekip sadece gorsele bakip karar vermesin diye; gorselin yaninda urunun
+    adi ve rengi de gorunsun.
+    """
+    bilgi = {"ad": "", "marka": "", "renk": "", "fiyat": "", "kod": "",
+             "aciklama": "", "ozellikler": []}
+
+    for urun in _json_ld_urunler(corba):
+        bilgi["ad"] = bilgi["ad"] or _metin(urun.get("name"))
+        bilgi["marka"] = bilgi["marka"] or _metin(urun.get("brand"))
+        bilgi["renk"] = bilgi["renk"] or _metin(urun.get("color"))
+        bilgi["kod"] = bilgi["kod"] or _metin(urun.get("sku") or urun.get("mpn"))
+        bilgi["aciklama"] = bilgi["aciklama"] or _metin(urun.get("description"))
+
+        teklif = urun.get("offers")
+        if teklif and not bilgi["fiyat"]:
+            ilk = teklif[0] if isinstance(teklif, list) and teklif else teklif
+            if isinstance(ilk, dict):
+                tutar = _metin(ilk.get("price") or (ilk.get("priceSpecification") or {}).get("price"))
+                birim = _metin(ilk.get("priceCurrency") or
+                               (ilk.get("priceSpecification") or {}).get("priceCurrency"))
+                if tutar:
+                    bilgi["fiyat"] = f"{tutar} {birim}".strip()
+
+        # Ek ozellikler (beden, materyal, desen gibi)
+        for ozellik in (urun.get("additionalProperty") or [])[:6]:
+            if isinstance(ozellik, dict):
+                ad = _metin(ozellik.get("name"))
+                deger = _metin(ozellik.get("value"))
+                if ad and deger:
+                    bilgi["ozellikler"].append(f"{ad}: {deger}")
+
+    # Yapisal veri yoksa sayfanin kendi basliklarina dusuyoruz
+    if not bilgi["ad"]:
+        for etiket in corba.find_all("meta"):
+            if etiket.get("property") == "og:title":
+                bilgi["ad"] = (etiket.get("content") or "").strip()
+                break
+    if not bilgi["ad"] and corba.find("h1"):
+        bilgi["ad"] = corba.find("h1").get_text(" ", strip=True)
+    if not bilgi["ad"] and corba.title:
+        bilgi["ad"] = corba.title.get_text(strip=True)
+
+    if not bilgi["aciklama"]:
+        for etiket in corba.find_all("meta"):
+            if etiket.get("property") == "og:description" or \
+               etiket.get("name") == "description":
+                bilgi["aciklama"] = (etiket.get("content") or "").strip()
+                break
+
+    # Renk sayfada "Renk: Lacivert" gibi yazili olabilir
+    if not bilgi["renk"]:
+        metin = corba.get_text(" ", strip=True)[:6000]
+        eslesme = re.search(r"\b(?:renk|color|colour|colore)\s*[:\-]\s*"
+                            r"([A-Za-zÇĞİÖŞÜçğıöşü/ ]{3,30})", metin, re.I)
+        if eslesme:
+            bilgi["renk"] = eslesme.group(1).strip(" -/")
+
+    for anahtar in ("ad", "marka", "renk", "fiyat", "kod", "aciklama"):
+        bilgi[anahtar] = re.sub(r"\s+", " ", bilgi[anahtar])[:300]
+    return bilgi
+
+
 def sayfa_gorselleri(sayfa_url, oturum, kod=""):
-    """Sayfadaki galeri gorsellerini ve kod dogrulama sonucunu dondurur."""
+    """Sayfadaki gorselleri, kod dogrulamasini ve urun bilgilerini dondurur."""
     try:
         cevap = oturum.get(sayfa_url, timeout=15)
         cevap.raise_for_status()
     except Exception:
-        return [], "yok"
+        return [], "yok", {}
     if "text/html" not in cevap.headers.get("Content-Type", ""):
-        return [], "yok"
+        return [], "yok", {}
 
     dogrulama = sayfayi_dogrula(cevap.text, kod)
     corba = BeautifulSoup(cevap.text, "html.parser")
+    bilgi = sayfa_bilgileri(corba, sayfa_url)
     adaylar, gorulen = [], set()
 
     def ekle(ham):
@@ -197,7 +312,7 @@ def sayfa_gorselleri(sayfa_url, oturum, kod=""):
                 ekle(resim[alan])
                 break
 
-    return adaylar, dogrulama
+    return adaylar, dogrulama, bilgi
 
 
 def gorsel_al(url, oturum, en_az=500, en_fazla_mb=12):
@@ -244,41 +359,67 @@ def urun_gorselleri(sorgu, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta
       "gevsek"- dogrulama yapma, arama ne verdiyse al
     """
     kod = kodu_ayikla(sorgu)
-    # Kodu tirnak icine alarak aratmak, arama motorunu birebir eslesmeye zorlar
-    aranan = sorgu.replace(kod, f'"{kod}"') if kod else sorgu
+    link_verildi = False
 
-    try:
-        sonuclar = DDGS().text(aranan, max_results=kac_site * 3)
-    except Exception as hata:
-        return [], [], f"arama yapılamadı ({hata})"
-
-    sayfalar, gorulen_alan = [], set()
-    for s in sonuclar:
-        adres = s.get("href") or s.get("link") or ""
+    # --- Kullanici dogrudan urun linki verdiyse aramaya hic gitmiyoruz
+    if re.match(r"https?://", sorgu.strip()):
+        link_verildi = True
+        adres = sorgu.strip()
         bulunan = re.findall(r"https?://([^/]+)", adres)
-        alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else ""
-        if not alan or alan in gorulen_alan or any(k in alan for k in ATLANACAK_ALAN):
-            continue
-        gorulen_alan.add(alan)
-        sayfalar.append((alan, adres))
-        if len(sayfalar) >= kac_site:
-            break
+        alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else "link"
+        aday_sayfalar = [(alan, adres)]
+        kod = ""                      # link verilmisse dogrulamaya gerek yok
+    else:
+        # Kodu tirnak icine almak arama motorunu birebir eslesmeye zorlar
+        aranan = sorgu.replace(kod, f'"{kod}"') if kod else sorgu
+        try:
+            sonuclar = DDGS().text(aranan, max_results=40)
+        except Exception as hata:
+            return [], [], f"arama yapılamadı ({hata})"
 
-    if not sayfalar:
+        # Tirnakli arama bos donduyse tirnaksiz tekrar dene
+        if not sonuclar and kod:
+            try:
+                sonuclar = DDGS().text(sorgu, max_results=40)
+            except Exception:
+                sonuclar = []
+
+        # Ihtiyactan cok aday topluyoruz: bir kismi dogrulamayi gecemeyecek
+        aday_sayfalar, gorulen_alan = [], set()
+        for s in sonuclar:
+            adres = s.get("href") or s.get("link") or ""
+            bulunan = re.findall(r"https?://([^/]+)", adres)
+            alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else ""
+            if not alan or alan in gorulen_alan or \
+               any(k in alan for k in ATLANACAK_ALAN):
+                continue
+            gorulen_alan.add(alan)
+            aday_sayfalar.append((alan, adres))
+            if len(aday_sayfalar) >= kac_site * 5:
+                break
+
+    if not aday_sayfalar:
         return [], [], "ürün sayfası bulunamadı"
 
     kabul = {"siki": {"tam"},
              "orta": {"tam", "kismi"},
              "gevsek": {"tam", "kismi", "yok"}}[katilik]
+    # Linki kullanici verdiyse dogrulamaya gerek yok - sayfayi zaten o secti
+    if link_verildi:
+        kabul = {"tam", "kismi", "yok"}
 
     imzalar, kayitlar, elenen = set(), [], []
-    for alan, adres in sayfalar:
-        if len(kayitlar) >= kac_gorsel:
+    kullanilan_site = 0
+    for alan, adres in aday_sayfalar:
+        # Dogrulamayi gecemeyen sayfa site hakkini harcamaz; siradakine bakariz.
+        # Cop sonuclar ilk siralari kaplasa bile gercek urun sayfasina ulasiriz.
+        if kullanilan_site >= kac_site or len(kayitlar) >= kac_gorsel:
             break
-        adaylar, dogrulama = sayfa_gorselleri(adres, oturum, kod)
+        adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod)
         if dogrulama not in kabul:
             elenen.append(alan)
             continue
+        kullanilan_site += 1
         for gorsel_url in adaylar:
             if len(kayitlar) >= kac_gorsel:
                 break
@@ -292,15 +433,88 @@ def urun_gorselleri(sorgu, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta
             imzalar.add(imza)
             kayitlar.append({"bayt": bayt, "gen": gen, "yuk": yuk,
                              "alan": alan, "uzanti": uzanti, "kaynak": adres,
-                             "dogrulama": dogrulama})
+                             "dogrulama": "link" if link_verildi else dogrulama,
+                             "bilgi": bilgi})
         time.sleep(0.4)
 
     kullanilan = sorted({k["alan"] for k in kayitlar})
     if not kayitlar and elenen:
-        return [], kullanilan, (f"kod hiçbir sayfada doğrulanamadı "
-                                f"({len(elenen)} site elendi) — eşleşme katılığını "
-                                f"gevşetin ya da marka adını değiştirin")
+        return [], kullanilan, (
+            f"kod hiçbir sayfada doğrulanamadı ({len(elenen)} site bakıldı) — "
+            f"ürün sayfasının linkini doğrudan yapıştırmayı deneyin, "
+            f"ya da eşleşme katılığını gevşetin")
     return kayitlar, kullanilan, ""
+
+
+# ----------------------------------------------------------------------------
+# Excel / CSV okuma
+# ----------------------------------------------------------------------------
+# Sutun basligi tahmini. Sirali degil puanli calisiyor: "Model Adi" hem
+# "model" hem "ad" iceriyor, ama "modeladi" tam eslesmesi kazandigi icin
+# urun adi sutunu olarak dogru yerlestiriliyor. Sirali eslesme yapsaydik
+# "Model Adi" yanlislikla kod sutunu secilebilirdi.
+ALAN_ANAHTARLARI = {
+    "kod": ("orijinalkod", "originalkod", "urunkodu", "stokkodu", "modelkodu",
+            "stilkodu", "barkod", "barcode", "kod", "code", "sku", "mpn",
+            "referans", "stil", "style"),
+    "ad": ("modeladi", "modelad", "urunadi", "urunad", "productname",
+           "modelname", "aciklama", "isim", "name", "title", "adi", "ad",
+           "model"),
+    "marka": ("markaadi", "marka", "brand", "uretici", "firma", "tedarikci"),
+}
+
+_TURKCE = str.maketrans("ğĞüÜşŞıİöÖçÇ", "gGuUsSiIoOcC")
+
+
+def _baslik_sadelestir(metin):
+    """Sutun basligini karsilastirmaya hazirlar (Turkce harfleri cevirir)."""
+    return re.sub(r"[^a-z0-9]", "", str(metin or "").translate(_TURKCE).lower())
+
+
+def _sutunlari_tahmin_et(sutunlar):
+    """Her alan icin en uygun sutunu secer; bir sutun iki alana atanmaz."""
+    puanlar = []
+    for sutun in sutunlar:
+        sade = _baslik_sadelestir(sutun)
+        if not sade:
+            continue
+        for alan, anahtarlar in ALAN_ANAHTARLARI.items():
+            en_iyi = 0
+            for anahtar in anahtarlar:
+                if sade == anahtar:                  # tam eslesme en gucludur
+                    en_iyi = max(en_iyi, 100 + len(anahtar))
+                elif anahtar in sade:                # icinde geciyor
+                    en_iyi = max(en_iyi, len(anahtar))
+            if en_iyi:
+                puanlar.append((en_iyi, alan, sutun))
+
+    puanlar.sort(key=lambda x: -x[0])
+    secim, kullanilan = {}, set()
+    for _, alan, sutun in puanlar:
+        if alan in secim or sutun in kullanilan:
+            continue
+        secim[alan] = sutun
+        kullanilan.add(sutun)
+    return secim
+
+
+def dosyayi_oku(dosya):
+    """Yuklenen Excel/CSV dosyasini tabloya cevirir."""
+    import pandas as pd
+    ad = (dosya.name or "").lower()
+    dosya.seek(0)                      # dosya daha once okunmus olabilir
+    if ad.endswith((".xlsx", ".xlsm", ".xls")):
+        return pd.read_excel(dosya, dtype=str)
+    for ayrac in (";", ",", "\t"):
+        try:
+            dosya.seek(0)
+            tablo = pd.read_csv(dosya, dtype=str, sep=ayrac)
+            if tablo.shape[1] > 1:
+                return tablo
+        except Exception:
+            continue
+    dosya.seek(0)
+    return pd.read_csv(dosya, dtype=str)
 
 
 # ----------------------------------------------------------------------------
@@ -331,23 +545,95 @@ with st.sidebar:
     katilik = {"Sıkı": "siki", "Orta": "orta", "Gevşek": "gevsek"}[katilik_adi]
 
     st.divider()
-    st.caption("Sonuç gelmiyorsa marka adını daha açık yazın "
-               "(örn. `sprayground backpack 910B8224NSZ`) ya da "
-               "en küçük görsel değerini düşürün.")
+    st.caption("Sonuç gelmiyorsa: ürün sayfasının linkini doğrudan yapıştırın, "
+               "marka adını daha açık yazın (örn. `sprayground backpack "
+               "910B8224NSZ`) ya da en küçük görsel değerini düşürün.")
     if st.button("Çıkış yap"):
         st.session_state.clear()
         st.rerun()
 
-girdi = st.text_area(
-    "Marka ve ürün kodu — her satıra bir ürün",
-    placeholder="sprayground 910B8224NSZ\ncrocs 212481-410\nnike DV5456-100",
-    height=140,
-)
+satirlar = []
 
-if st.button("Görselleri bul", type="primary", use_container_width=True):
-    satirlar = [s.strip() for s in (girdi or "").strip().splitlines() if s.strip()]
+sekme_excel, sekme_yazi = st.tabs(["Excel / CSV yükle", "Elle yaz"])
+
+with sekme_excel:
+    dosya = st.file_uploader("Ürün listesi", type=["xlsx", "xlsm", "xls", "csv"],
+                             label_visibility="collapsed")
+    if dosya:
+        try:
+            tablo = dosyayi_oku(dosya)
+        except Exception as hata:
+            st.error(f"Dosya okunamadı: {hata}")
+            tablo = None
+
+        if tablo is not None and not tablo.empty:
+            sutunlar = list(tablo.columns)
+            tahmin = _sutunlari_tahmin_et(sutunlar)
+            yok = "(yok)"
+            secenek = [yok] + sutunlar
+
+            def _sira(alan, varsayilan=0):
+                ad = tahmin.get(alan)
+                return secenek.index(ad) if ad in secenek else varsayilan
+
+            s1, s2, s3, s4 = st.columns([2, 2, 2, 1])
+            with s1:
+                kod_sutunu = st.selectbox("Orijinal kod sütunu", sutunlar,
+                                          index=(sutunlar.index(tahmin["kod"])
+                                                 if tahmin.get("kod") in sutunlar
+                                                 else 0))
+            with s2:
+                ad_sutunu = st.selectbox("Model adı sütunu", secenek,
+                                         index=_sira("ad"))
+            with s3:
+                marka_sutunu = st.selectbox("Marka sütunu", secenek,
+                                            index=_sira("marka"))
+            with s4:
+                kac_satir = st.number_input("Kaç ürün", 1, 200,
+                                            min(20, len(tablo)))
+
+            def _hucre(satir, sutun):
+                if sutun == yok:
+                    return ""
+                deger = str(satir.get(sutun, "") or "").strip()
+                return "" if deger.lower() in ("nan", "none") else deger
+
+            for _, satir in tablo.head(int(kac_satir)).iterrows():
+                kod_degeri = _hucre(satir, kod_sutunu)
+                if not kod_degeri:
+                    continue
+                parcalar = [_hucre(satir, marka_sutunu),
+                            _hucre(satir, ad_sutunu),
+                            kod_degeri]
+                satirlar.append(" ".join(p for p in parcalar if p))
+
+            st.success(f"{len(tablo)} satırlık dosyadan {len(satirlar)} ürün hazır.")
+            st.caption("Örnek: " + " · ".join(satirlar[:3]))
+            with st.expander("Dosyanın ilk satırlarını göster"):
+                st.dataframe(tablo.head(10), use_container_width=True)
+
+with sekme_yazi:
+    girdi = st.text_area(
+        "Her satıra bir ürün — marka + kod, ya da doğrudan ürün linki",
+        placeholder=("sprayground 910B8224NSZ\n"
+                     "crocs 212481-410\n"
+                     "https://rubaiyat.com/products/palm-angels-pmaa10..."),
+        height=140,
+        label_visibility="collapsed",
+    )
+    st.caption("Ürünün sayfasını zaten biliyorsan linki yapıştır — arama yapılmaz, "
+               "doğrudan o sayfanın görselleri alınır. Uzun ve karışık kodlarda "
+               "en garantili yol budur.")
+    if girdi and girdi.strip():
+        satirlar = [x.strip() for x in girdi.strip().splitlines() if x.strip()]
+
+if satirlar:
+    st.caption(f"{len(satirlar)} ürün işlenecek")
+
+if st.button("Görselleri bul", type="primary", use_container_width=True,
+             disabled=not satirlar):
     if not satirlar:
-        st.warning("Önce marka ve ürün kodu yazın.")
+        st.warning("Önce Excel yükleyin ya da elle ürün yazın.")
         st.stop()
 
     oturum = requests.Session()
@@ -379,39 +665,82 @@ for sorgu, kayitlar, alanlar, hata in st.session_state.get("sonuclar", []):
                    "ya da en küçük görsel değerini düşürün.")
         continue
 
+    baglanti = sum(1 for k in kayitlar if k.get("dogrulama") == "link")
     tam = sum(1 for k in kayitlar if k.get("dogrulama") == "tam")
     kismi = sum(1 for k in kayitlar if k.get("dogrulama") == "kismi")
     supheli = sum(1 for k in kayitlar if k.get("dogrulama") == "yok")
     dagilim = []
+    if baglanti:
+        dagilim.append(f"{baglanti} verdiğin linkten")
     if tam:
         dagilim.append(f"{tam} kod doğrulandı")
     if kismi:
         dagilim.append(f"{kismi} kısmi eşleşme")
     if supheli:
         dagilim.append(f"{supheli} doğrulanmadı")
-    st.caption(f"{len(kayitlar)} görsel · {' · '.join(dagilim)} · "
-               f"kaynak: {', '.join(alanlar)}")
+    st.caption(f"{len(kayitlar)} görsel · {' · '.join(dagilim)}")
     if supheli:
         st.warning("Doğrulanmamış görseller var — ürün kodu o sayfalarda geçmiyor. "
                    "Kontrol ederek kullanın.")
 
-    sutunlar = st.columns(5)
-    for i, kayit in enumerate(kayitlar):
-        with sutunlar[i % 5]:
-            st.image(kayit["bayt"], use_container_width=True)
-            rozet = {"tam": "✓ kod doğrulandı",
-                     "kismi": "~ kısmi eşleşme",
-                     "yok": "⚠ doğrulanmadı"}.get(kayit.get("dogrulama"), "")
-            st.caption(f"{kayit['gen']}×{kayit['yuk']} · {kayit['alan']}  \n{rozet}")
-            st.download_button(
-                "İndir",
-                data=kayit["bayt"],
-                file_name=f"{re.sub(r'[^A-Za-z0-9._-]+', '_', sorgu)}_"
-                          f"{i + 1:02d}{kayit['uzanti']}",
-                mime=f"image/{kayit['uzanti'].lstrip('.')}",
-                key=f"tek_{sorgu}_{i}",
-                use_container_width=True,
-            )
+    # Gorselleri geldikleri sayfaya gore grupluyoruz: her grubun basinda o
+    # sayfanin urun bilgisi duruyor, ekip sadece gorsele bakip karar vermesin.
+    gruplar = {}
+    for kayit in kayitlar:
+        gruplar.setdefault(kayit["kaynak"], []).append(kayit)
+
+    for kaynak, grup in gruplar.items():
+        bilgi = grup[0].get("bilgi") or {}
+        alan = grup[0]["alan"]
+
+        with st.container(border=True):
+            ust, yan = st.columns([3, 1])
+            with ust:
+                baslik = bilgi.get("ad") or "(ürün adı bulunamadı)"
+                st.markdown(f"**{baslik}**")
+
+                etiketler = []
+                if bilgi.get("marka"):
+                    etiketler.append(f"Marka: **{bilgi['marka']}**")
+                if bilgi.get("renk"):
+                    etiketler.append(f"Renk: **{bilgi['renk']}**")
+                if bilgi.get("kod"):
+                    etiketler.append(f"Sitedeki kod: `{bilgi['kod']}`")
+                if bilgi.get("fiyat"):
+                    etiketler.append(f"Fiyat: {bilgi['fiyat']}")
+                for ozellik in (bilgi.get("ozellikler") or [])[:4]:
+                    etiketler.append(ozellik)
+                if etiketler:
+                    st.markdown(" · ".join(etiketler))
+                else:
+                    st.caption("Bu sayfadan ürün bilgisi çıkarılamadı — "
+                               "görselleri kontrol ederek kullanın.")
+
+                if bilgi.get("aciklama"):
+                    with st.expander("Açıklama"):
+                        st.write(bilgi["aciklama"])
+            with yan:
+                st.caption(alan)
+                st.link_button("Sayfayı aç", kaynak, use_container_width=True)
+
+            sutunlar = st.columns(5)
+            for i, kayit in enumerate(grup):
+                with sutunlar[i % 5]:
+                    st.image(kayit["bayt"], use_container_width=True)
+                    rozet = {"tam": "✓ kod doğrulandı",
+                             "kismi": "~ kısmi eşleşme",
+                             "yok": "⚠ doğrulanmadı",
+                             "link": "✓ verdiğin link"}.get(kayit.get("dogrulama"), "")
+                    st.caption(f"{kayit['gen']}×{kayit['yuk']}  \n{rozet}")
+                    st.download_button(
+                        "İndir",
+                        data=kayit["bayt"],
+                        file_name=f"{re.sub(r'[^A-Za-z0-9._-]+', '_', sorgu)}_"
+                                  f"{i + 1:02d}{kayit['uzanti']}",
+                        mime=f"image/{kayit['uzanti'].lstrip('.')}",
+                        key=f"tek_{sorgu}_{kaynak}_{i}",
+                        use_container_width=True,
+                    )
 
 # --- Hepsini birden indir ---
 sonuclar = st.session_state.get("sonuclar", [])
