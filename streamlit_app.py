@@ -222,13 +222,38 @@ def _metin(deger):
     return ""
 
 
+def _sozluk(deger):
+    """Sozluk bekledigimiz yerde liste ya da metin gelebiliyor.
+
+    Sitelerin yapisal verisi standart degil: "offers" ve "priceSpecification"
+    kimi sayfada tek nesne, kimi sayfada liste. Liste geldiginde ilk sozlugu
+    aliyoruz; hicbiri sozluk degilse bos sozluk donuyor ki .get() patlamasin.
+    """
+    if isinstance(deger, dict):
+        return deger
+    if isinstance(deger, list):
+        for oge in deger:
+            if isinstance(oge, dict):
+                return oge
+    return {}
+
+
+def _liste(deger):
+    """Liste bekledigimiz yerde tek nesne gelebiliyor."""
+    if isinstance(deger, list):
+        return deger
+    if deger is None:
+        return []
+    return [deger]
+
+
 def sayfa_bilgileri(corba, sayfa_url):
-    """Sayfadan urun adi, renk, fiyat gibi dogrulanabilir bilgileri cikarir.
+    """Sayfadan urun adi, marka, renk gibi dogrulanabilir bilgileri cikarir.
 
     Ekip sadece gorsele bakip karar vermesin diye; gorselin yaninda urunun
     adi ve rengi de gorunsun.
     """
-    bilgi = {"ad": "", "marka": "", "renk": "", "fiyat": "", "kod": "",
+    bilgi = {"ad": "", "marka": "", "renk": "", "kod": "",
              "aciklama": "", "ozellikler": []}
 
     for urun in _json_ld_urunler(corba):
@@ -238,18 +263,8 @@ def sayfa_bilgileri(corba, sayfa_url):
         bilgi["kod"] = bilgi["kod"] or _metin(urun.get("sku") or urun.get("mpn"))
         bilgi["aciklama"] = bilgi["aciklama"] or _metin(urun.get("description"))
 
-        teklif = urun.get("offers")
-        if teklif and not bilgi["fiyat"]:
-            ilk = teklif[0] if isinstance(teklif, list) and teklif else teklif
-            if isinstance(ilk, dict):
-                tutar = _metin(ilk.get("price") or (ilk.get("priceSpecification") or {}).get("price"))
-                birim = _metin(ilk.get("priceCurrency") or
-                               (ilk.get("priceSpecification") or {}).get("priceCurrency"))
-                if tutar:
-                    bilgi["fiyat"] = f"{tutar} {birim}".strip()
-
         # Ek ozellikler (beden, materyal, desen gibi)
-        for ozellik in (urun.get("additionalProperty") or [])[:6]:
+        for ozellik in _liste(urun.get("additionalProperty"))[:6]:
             if isinstance(ozellik, dict):
                 ad = _metin(ozellik.get("name"))
                 deger = _metin(ozellik.get("value"))
@@ -282,7 +297,7 @@ def sayfa_bilgileri(corba, sayfa_url):
         if eslesme:
             bilgi["renk"] = eslesme.group(1).strip(" -/")
 
-    for anahtar in ("ad", "marka", "renk", "fiyat", "kod", "aciklama"):
+    for anahtar in ("ad", "marka", "renk", "kod", "aciklama"):
         bilgi[anahtar] = re.sub(r"\s+", " ", bilgi[anahtar])[:300]
     return bilgi
 
@@ -299,7 +314,12 @@ def sayfa_gorselleri(sayfa_url, oturum, kod=""):
 
     dogrulama = sayfayi_dogrula(cevap.text, kod)
     corba = BeautifulSoup(cevap.text, "html.parser")
-    bilgi = sayfa_bilgileri(corba, sayfa_url)
+    # Bilgi cikarimi sayfanin yapisina bagli; beklenmedik bir bicim gelirse
+    # gorselleri kaybetmemek icin sadece bilgiyi bos gecip devam ediyoruz.
+    try:
+        bilgi = sayfa_bilgileri(corba, sayfa_url)
+    except Exception:
+        bilgi = {}
     adaylar, gorulen = [], set()
 
     def ekle(ham):
@@ -772,8 +792,13 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
                  or " ".join(x for x in (urun.get("marka"), urun.get("kod")) if x)
                  or urun.get("ad") or "ürün")
         ilerleme.progress(sira / len(satirlar), text=f"Aranıyor: {sorgu}")
-        kayitlar, alanlar, hata, kullanilan = urun_gorselleri(
-            urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik)
+        try:
+            kayitlar, alanlar, hata, kullanilan = urun_gorselleri(
+                urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik)
+        except Exception as sorun:
+            # Bir urunde beklenmedik hata cikarsa listenin geri kalani dursun
+            kayitlar, alanlar, kullanilan = [], [], ""
+            hata = f"beklenmedik hata: {type(sorun).__name__} — {sorun}"
         tum_sonuclar.append((sorgu, kayitlar, alanlar, hata, kullanilan))
 
     ilerleme.progress(1.0, text="Bitti")
@@ -840,8 +865,6 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
                     etiketler.append(f"Renk: **{bilgi['renk']}**")
                 if bilgi.get("kod"):
                     etiketler.append(f"Sitedeki kod: `{bilgi['kod']}`")
-                if bilgi.get("fiyat"):
-                    etiketler.append(f"Fiyat: {bilgi['fiyat']}")
                 for ozellik in (bilgi.get("ozellikler") or [])[:4]:
                     etiketler.append(ozellik)
                 if etiketler:
