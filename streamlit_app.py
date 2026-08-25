@@ -121,15 +121,47 @@ def _buyut(url):
     return url
 
 
-def sayfa_gorselleri(sayfa_url, oturum):
+def _sadelestir(metin):
+    """Karsilastirma icin harf ve rakam disindaki her seyi atar."""
+    return re.sub(r"[^a-z0-9]", "", (metin or "").lower())
+
+
+def kodu_ayikla(sorgu):
+    """Sorgu icindeki urun kodunu tahmin eder: rakam iceren en uzun parca."""
+    adaylar = [p for p in sorgu.split() if any(k.isdigit() for k in p)]
+    return max(adaylar, key=len) if adaylar else ""
+
+
+def sayfayi_dogrula(html, kod):
+    """Urun kodu sayfada geciyor mu?
+
+    'tam'   - kodun tamami geciyor (212481-410)
+    'kismi' - sadece ana govdesi geciyor (212481). Renk/beden ayri yazilmis
+              olabilir; bu sayfalar genelde dogru urundur.
+    'yok'   - kod hic gecmiyor. Buyuk ihtimalle alakasiz sayfa.
+    """
+    if not kod:
+        return "kismi"
+    sade_sayfa = _sadelestir(html)
+    if _sadelestir(kod) in sade_sayfa:
+        return "tam"
+    govde = max(re.findall(r"\d{4,}", kod), key=len, default="")
+    if govde and govde in sade_sayfa:
+        return "kismi"
+    return "yok"
+
+
+def sayfa_gorselleri(sayfa_url, oturum, kod=""):
+    """Sayfadaki galeri gorsellerini ve kod dogrulama sonucunu dondurur."""
     try:
         cevap = oturum.get(sayfa_url, timeout=15)
         cevap.raise_for_status()
     except Exception:
-        return []
+        return [], "yok"
     if "text/html" not in cevap.headers.get("Content-Type", ""):
-        return []
+        return [], "yok"
 
+    dogrulama = sayfayi_dogrula(cevap.text, kod)
     corba = BeautifulSoup(cevap.text, "html.parser")
     adaylar, gorulen = [], set()
 
@@ -151,8 +183,8 @@ def sayfa_gorselleri(sayfa_url, oturum):
             ekle(etiket.get("content", ""))
 
     # Sayfanin yapisal verisi: gorseller tek adres ya da dizi olarak yazilabilir
-    for kod in corba.find_all("script", type="application/ld+json"):
-        metin = kod.get_text() or ""
+    for betik in corba.find_all("script", type="application/ld+json"):
+        metin = betik.get_text() or ""
         for parca in re.findall(r'"([^"\s]+\.(?:jpg|jpeg|png|webp)[^"\s]*)"', metin, re.I):
             ekle(parca.replace("\\/", "/"))
 
@@ -165,7 +197,7 @@ def sayfa_gorselleri(sayfa_url, oturum):
                 ekle(resim[alan])
                 break
 
-    return adaylar
+    return adaylar, dogrulama
 
 
 def gorsel_al(url, oturum, en_az=500, en_fazla_mb=12):
@@ -203,10 +235,20 @@ def gorsel_al(url, oturum, en_az=500, en_fazla_mb=12):
 # ----------------------------------------------------------------------------
 # Arama
 # ----------------------------------------------------------------------------
-def urun_gorselleri(sorgu, kac_gorsel, kac_site, en_kucuk, oturum):
-    """Tek bir urun icin gorselleri toplar."""
+def urun_gorselleri(sorgu, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"):
+    """Tek bir urun icin gorselleri toplar.
+
+    katilik:
+      "siki"  - sadece kodun tamaminin gectigi sayfalar
+      "orta"  - kodun tamami ya da govdesi gecen sayfalar (varsayilan)
+      "gevsek"- dogrulama yapma, arama ne verdiyse al
+    """
+    kod = kodu_ayikla(sorgu)
+    # Kodu tirnak icine alarak aratmak, arama motorunu birebir eslesmeye zorlar
+    aranan = sorgu.replace(kod, f'"{kod}"') if kod else sorgu
+
     try:
-        sonuclar = DDGS().text(sorgu, max_results=kac_site * 3)
+        sonuclar = DDGS().text(aranan, max_results=kac_site * 3)
     except Exception as hata:
         return [], [], f"arama yapılamadı ({hata})"
 
@@ -225,11 +267,19 @@ def urun_gorselleri(sorgu, kac_gorsel, kac_site, en_kucuk, oturum):
     if not sayfalar:
         return [], [], "ürün sayfası bulunamadı"
 
-    imzalar, kayitlar = set(), []
+    kabul = {"siki": {"tam"},
+             "orta": {"tam", "kismi"},
+             "gevsek": {"tam", "kismi", "yok"}}[katilik]
+
+    imzalar, kayitlar, elenen = set(), [], []
     for alan, adres in sayfalar:
         if len(kayitlar) >= kac_gorsel:
             break
-        for gorsel_url in sayfa_gorselleri(adres, oturum):
+        adaylar, dogrulama = sayfa_gorselleri(adres, oturum, kod)
+        if dogrulama not in kabul:
+            elenen.append(alan)
+            continue
+        for gorsel_url in adaylar:
             if len(kayitlar) >= kac_gorsel:
                 break
             sonuc = gorsel_al(gorsel_url, oturum, en_az=en_kucuk)
@@ -241,10 +291,16 @@ def urun_gorselleri(sorgu, kac_gorsel, kac_site, en_kucuk, oturum):
                 continue
             imzalar.add(imza)
             kayitlar.append({"bayt": bayt, "gen": gen, "yuk": yuk,
-                             "alan": alan, "uzanti": uzanti, "kaynak": adres})
+                             "alan": alan, "uzanti": uzanti, "kaynak": adres,
+                             "dogrulama": dogrulama})
         time.sleep(0.4)
 
-    return kayitlar, [a for a, _ in sayfalar], ""
+    kullanilan = sorted({k["alan"] for k in kayitlar})
+    if not kayitlar and elenen:
+        return [], kullanilan, (f"kod hiçbir sayfada doğrulanamadı "
+                                f"({len(elenen)} site elendi) — eşleşme katılığını "
+                                f"gevşetin ya da marka adını değiştirin")
+    return kayitlar, kullanilan, ""
 
 
 # ----------------------------------------------------------------------------
@@ -258,6 +314,22 @@ with st.sidebar:
     kac_gorsel = st.slider("Ürün başına görsel", 4, 30, 12)
     kac_site = st.slider("Kaç site taransın", 2, 10, 5)
     en_kucuk = st.slider("En küçük görsel (piksel)", 200, 1200, 500, step=50)
+
+    st.divider()
+    st.subheader("Eşleşme katılığı")
+    katilik_adi = st.radio(
+        "Ürün kodu sayfada geçiyor mu diye kontrol edilsin mi?",
+        ["Sıkı", "Orta", "Gevşek"],
+        index=1,
+        captions=[
+            "Sadece kodun tamamının geçtiği sayfalar. En temiz, bazen hiç sonuç vermez.",
+            "Kodun tamamı ya da ana gövdesi geçsin. Önerilen.",
+            "Kontrol etme, arama ne verdiyse al. Alakasız sonuç gelebilir.",
+        ],
+        label_visibility="collapsed",
+    )
+    katilik = {"Sıkı": "siki", "Orta": "orta", "Gevşek": "gevsek"}[katilik_adi]
+
     st.divider()
     st.caption("Sonuç gelmiyorsa marka adını daha açık yazın "
                "(örn. `sprayground backpack 910B8224NSZ`) ya da "
@@ -288,7 +360,7 @@ if st.button("Görselleri bul", type="primary", use_container_width=True):
         sorgu = " ".join(satir.split())
         ilerleme.progress(sira / len(satirlar), text=f"Aranıyor: {sorgu}")
         kayitlar, alanlar, hata = urun_gorselleri(
-            sorgu, kac_gorsel, kac_site, en_kucuk, oturum)
+            sorgu, kac_gorsel, kac_site, en_kucuk, oturum, katilik)
         tum_sonuclar.append((sorgu, kayitlar, alanlar, hata))
 
     ilerleme.progress(1.0, text="Bitti")
@@ -307,13 +379,30 @@ for sorgu, kayitlar, alanlar, hata in st.session_state.get("sonuclar", []):
                    "ya da en küçük görsel değerini düşürün.")
         continue
 
-    st.caption(f"{len(kayitlar)} görsel · taranan siteler: {', '.join(alanlar)}")
+    tam = sum(1 for k in kayitlar if k.get("dogrulama") == "tam")
+    kismi = sum(1 for k in kayitlar if k.get("dogrulama") == "kismi")
+    supheli = sum(1 for k in kayitlar if k.get("dogrulama") == "yok")
+    dagilim = []
+    if tam:
+        dagilim.append(f"{tam} kod doğrulandı")
+    if kismi:
+        dagilim.append(f"{kismi} kısmi eşleşme")
+    if supheli:
+        dagilim.append(f"{supheli} doğrulanmadı")
+    st.caption(f"{len(kayitlar)} görsel · {' · '.join(dagilim)} · "
+               f"kaynak: {', '.join(alanlar)}")
+    if supheli:
+        st.warning("Doğrulanmamış görseller var — ürün kodu o sayfalarda geçmiyor. "
+                   "Kontrol ederek kullanın.")
 
     sutunlar = st.columns(5)
     for i, kayit in enumerate(kayitlar):
         with sutunlar[i % 5]:
             st.image(kayit["bayt"], use_container_width=True)
-            st.caption(f"{kayit['gen']}×{kayit['yuk']} · {kayit['alan']}")
+            rozet = {"tam": "✓ kod doğrulandı",
+                     "kismi": "~ kısmi eşleşme",
+                     "yok": "⚠ doğrulanmadı"}.get(kayit.get("dogrulama"), "")
+            st.caption(f"{kayit['gen']}×{kayit['yuk']} · {kayit['alan']}  \n{rozet}")
             st.download_button(
                 "İndir",
                 data=kayit["bayt"],
