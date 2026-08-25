@@ -350,7 +350,73 @@ def gorsel_al(url, oturum, en_az=500, en_fazla_mb=12):
 # ----------------------------------------------------------------------------
 # Arama
 # ----------------------------------------------------------------------------
-def urun_gorselleri(sorgu, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"):
+def onizleme_yap(bayt, kenar=520):
+    """Izgaranin duzgun hizalanmasi icin kare, dolgulu onizleme uretir.
+
+    Gorsellerin en-boy oranlari farkli oldugundan (1024x1024, 1200x1845...)
+    olduklari gibi basilinca satirlar kayiyor ve dugmeler hizasiz duruyor.
+    Indirilen dosya orijinal kalir; sadece ekranda gosterilen kucultulur.
+    """
+    try:
+        with Image.open(io.BytesIO(bayt)) as gorsel:
+            kucuk = gorsel.convert("RGB")
+            kucuk.thumbnail((kenar, kenar), Image.LANCZOS)
+            tuval = Image.new("RGB", (kenar, kenar), (255, 255, 255))
+            tuval.paste(kucuk, ((kenar - kucuk.width) // 2,
+                                (kenar - kucuk.height) // 2))
+            cikti = io.BytesIO()
+            tuval.save(cikti, format="JPEG", quality=88)
+            return cikti.getvalue()
+    except Exception:
+        return bayt
+
+
+def _tek_arama(sorgu, adet=40):
+    """Tek bir arama denemesi. Kutuphane sonuc bulamayinca hata firlatiyor,
+    bu yuzden hatayi bos sonuc gibi ele aliyoruz."""
+    try:
+        return DDGS().text(sorgu, max_results=adet) or []
+    except Exception:
+        return []
+
+
+def ara_kademeli(marka, ad, kod):
+    """Sonuc bulana kadar sorguyu kademe kademe degistirir.
+
+    Marka ve orijinal kod sabittir; model adi ise sitelere gore degisir
+    ("Spray Bear Over Tee" / "Spray Bear T-Shirt" / "Palm Sport Stripes Polo").
+    Bu yuzden once marka + kod deniyoruz - hem daha isabetli hem daha hizli.
+    Model adi yalnizca digerleri sonuc vermezse son care olarak kullaniliyor.
+    """
+    def temizle(metin):
+        metin = re.sub(r"[/\\|,;]+", " ", metin or "")
+        return re.sub(r"\s+", " ", metin).strip()
+
+    marka, ad, kod = temizle(marka), temizle(ad), temizle(kod)
+
+    denemeler = []
+    if kod:
+        if marka:
+            denemeler.append(f'{marka} "{kod}"')      # 1. asil yol
+        denemeler.append(f'"{kod}"')                  # 2. sadece kod, birebir
+        denemeler.append(kod)                         # 3. sadece kod, serbest
+        if ad:                                        # 4. son care: model adi
+            denemeler.append(temizle(f"{marka} {ad} {kod}"))
+    else:
+        denemeler.append(temizle(f"{marka} {ad}"))
+
+    gorulen = set()
+    for deneme in denemeler:
+        if not deneme or deneme in gorulen:
+            continue
+        gorulen.add(deneme)
+        sonuclar = _tek_arama(deneme)
+        if sonuclar:
+            return sonuclar, deneme
+    return [], ""
+
+
+def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"):
     """Tek bir urun icin gorselleri toplar.
 
     katilik:
@@ -358,36 +424,29 @@ def urun_gorselleri(sorgu, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta
       "orta"  - kodun tamami ya da govdesi gecen sayfalar (varsayilan)
       "gevsek"- dogrulama yapma, arama ne verdiyse al
     """
-    kod = kodu_ayikla(sorgu)
-    link_verildi = False
+    kod = (urun.get("kod") or "").strip()
+    marka = (urun.get("marka") or "").strip()
+    ad = (urun.get("ad") or "").strip()
+    link = (urun.get("url") or "").strip()
+    link_verildi = bool(link)
+    kullanilan_sorgu = ""
 
     # --- Kullanici dogrudan urun linki verdiyse aramaya hic gitmiyoruz
-    if re.match(r"https?://", sorgu.strip()):
-        link_verildi = True
-        adres = sorgu.strip()
-        bulunan = re.findall(r"https?://([^/]+)", adres)
+    if link_verildi:
+        bulunan = re.findall(r"https?://([^/]+)", link)
         alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else "link"
-        aday_sayfalar = [(alan, adres)]
+        aday_sayfalar = [(alan, link)]
         kod = ""                      # link verilmisse dogrulamaya gerek yok
     else:
-        # Kodu tirnak icine almak arama motorunu birebir eslesmeye zorlar
-        aranan = sorgu.replace(kod, f'"{kod}"') if kod else sorgu
-        try:
-            sonuclar = DDGS().text(aranan, max_results=40)
-        except Exception as hata:
-            return [], [], f"arama yapılamadı ({hata})"
-
-        # Tirnakli arama bos donduyse tirnaksiz tekrar dene
-        if not sonuclar and kod:
-            try:
-                sonuclar = DDGS().text(sorgu, max_results=40)
-            except Exception:
-                sonuclar = []
+        sonuclar, kullanilan_sorgu = ara_kademeli(marka, ad, kod)
+        if not sonuclar:
+            return [], [], ("arama hiçbir sonuç vermedi — ürün sayfasının linkini "
+                            "doğrudan yapıştırmayı deneyin"), ""
 
         # Ihtiyactan cok aday topluyoruz: bir kismi dogrulamayi gecemeyecek
         aday_sayfalar, gorulen_alan = [], set()
-        for s in sonuclar:
-            adres = s.get("href") or s.get("link") or ""
+        for sonuc in sonuclar:
+            adres = sonuc.get("href") or sonuc.get("link") or ""
             bulunan = re.findall(r"https?://([^/]+)", adres)
             alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else ""
             if not alan or alan in gorulen_alan or \
@@ -399,7 +458,7 @@ def urun_gorselleri(sorgu, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta
                 break
 
     if not aday_sayfalar:
-        return [], [], "ürün sayfası bulunamadı"
+        return [], [], "ürün sayfası bulunamadı", kullanilan_sorgu
 
     kabul = {"siki": {"tam"},
              "orta": {"tam", "kismi"},
@@ -442,8 +501,8 @@ def urun_gorselleri(sorgu, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta
         return [], kullanilan, (
             f"kod hiçbir sayfada doğrulanamadı ({len(elenen)} site bakıldı) — "
             f"ürün sayfasının linkini doğrudan yapıştırmayı deneyin, "
-            f"ya da eşleşme katılığını gevşetin")
-    return kayitlar, kullanilan, ""
+            f"ya da eşleşme katılığını gevşetin"), kullanilan_sorgu
+    return kayitlar, kullanilan, "", kullanilan_sorgu
 
 
 # ----------------------------------------------------------------------------
@@ -576,21 +635,30 @@ with sekme_excel:
                 ad = tahmin.get(alan)
                 return secenek.index(ad) if ad in secenek else varsayilan
 
-            s1, s2, s3, s4 = st.columns([2, 2, 2, 1])
-            with s1:
-                kod_sutunu = st.selectbox("Orijinal kod sütunu", sutunlar,
-                                          index=(sutunlar.index(tahmin["kod"])
-                                                 if tahmin.get("kod") in sutunlar
-                                                 else 0))
-            with s2:
-                ad_sutunu = st.selectbox("Model adı sütunu", secenek,
-                                         index=_sira("ad"))
-            with s3:
-                marka_sutunu = st.selectbox("Marka sütunu", secenek,
-                                            index=_sira("marka"))
-            with s4:
-                kac_satir = st.number_input("Kaç ürün", 1, 200,
-                                            min(20, len(tablo)))
+            hepsi_bulundu = all(tahmin.get(a) for a in ("kod", "ad", "marka"))
+            ozet_satiri = " · ".join(
+                f"{etiket}: **{tahmin[a]}**"
+                for a, etiket in (("kod", "Kod"), ("ad", "Model"), ("marka", "Marka"))
+                if tahmin.get(a))
+            if ozet_satiri:
+                st.markdown(("✓ " if hepsi_bulundu else "") + ozet_satiri)
+
+            # Tahmin tuttuysa acilir menuler kapali durur, ekran kalabalik olmaz
+            with st.expander("Sütunları değiştir", expanded=not hepsi_bulundu):
+                s1, s2, s3 = st.columns(3)
+                with s1:
+                    kod_sutunu = st.selectbox(
+                        "Orijinal kod", sutunlar,
+                        index=(sutunlar.index(tahmin["kod"])
+                               if tahmin.get("kod") in sutunlar else 0))
+                with s2:
+                    ad_sutunu = st.selectbox("Model adı", secenek, index=_sira("ad"))
+                with s3:
+                    marka_sutunu = st.selectbox("Marka", secenek, index=_sira("marka"))
+                st.dataframe(tablo.head(5), use_container_width=True)
+
+            kac_satir = st.number_input("Kaç ürün işlensin", 1, 200,
+                                        min(20, len(tablo)))
 
             def _hucre(satir, sutun):
                 if sutun == yok:
@@ -602,15 +670,18 @@ with sekme_excel:
                 kod_degeri = _hucre(satir, kod_sutunu)
                 if not kod_degeri:
                     continue
-                parcalar = [_hucre(satir, marka_sutunu),
-                            _hucre(satir, ad_sutunu),
-                            kod_degeri]
-                satirlar.append(" ".join(p for p in parcalar if p))
+                satirlar.append({
+                    "kod": kod_degeri,
+                    "marka": _hucre(satir, marka_sutunu),
+                    "ad": _hucre(satir, ad_sutunu),
+                    "url": "",
+                })
 
             st.success(f"{len(tablo)} satırlık dosyadan {len(satirlar)} ürün hazır.")
-            st.caption("Örnek: " + " · ".join(satirlar[:3]))
-            with st.expander("Dosyanın ilk satırlarını göster"):
-                st.dataframe(tablo.head(10), use_container_width=True)
+            if satirlar:
+                ilk = satirlar[0]
+                st.caption(f"Örnek arama: {ilk['marka']} \"{ilk['kod']}\"".strip()
+                           + "   ·   model adı yalnızca sonuç çıkmazsa kullanılır")
 
 with sekme_yazi:
     girdi = st.text_area(
@@ -625,7 +696,17 @@ with sekme_yazi:
                "doğrudan o sayfanın görselleri alınır. Uzun ve karışık kodlarda "
                "en garantili yol budur.")
     if girdi and girdi.strip():
-        satirlar = [x.strip() for x in girdi.strip().splitlines() if x.strip()]
+        for ham in girdi.strip().splitlines():
+            ham = ham.strip()
+            if not ham:
+                continue
+            if re.match(r"https?://", ham):
+                satirlar.append({"kod": "", "marka": "", "ad": "", "url": ham})
+                continue
+            # Rakam iceren en uzun parca kod, geri kalani marka sayilir
+            kod_p = kodu_ayikla(ham)
+            marka_p = " ".join(w for w in ham.split() if w != kod_p)
+            satirlar.append({"kod": kod_p, "marka": marka_p, "ad": "", "url": ""})
 
 if satirlar:
     st.caption(f"{len(satirlar)} ürün işlenecek")
@@ -642,20 +723,24 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
     tum_sonuclar = []
     ilerleme = st.progress(0.0, text="Başlıyor...")
 
-    for sira, satir in enumerate(satirlar):
-        sorgu = " ".join(satir.split())
+    for sira, urun in enumerate(satirlar):
+        sorgu = (urun.get("url")
+                 or " ".join(x for x in (urun.get("marka"), urun.get("kod")) if x)
+                 or urun.get("ad") or "ürün")
         ilerleme.progress(sira / len(satirlar), text=f"Aranıyor: {sorgu}")
-        kayitlar, alanlar, hata = urun_gorselleri(
-            sorgu, kac_gorsel, kac_site, en_kucuk, oturum, katilik)
-        tum_sonuclar.append((sorgu, kayitlar, alanlar, hata))
+        kayitlar, alanlar, hata, kullanilan = urun_gorselleri(
+            urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik)
+        tum_sonuclar.append((sorgu, kayitlar, alanlar, hata, kullanilan))
 
     ilerleme.progress(1.0, text="Bitti")
     ilerleme.empty()
     st.session_state["sonuclar"] = tum_sonuclar
 
 # --- Sonuclari goster ---
-for sorgu, kayitlar, alanlar, hata in st.session_state.get("sonuclar", []):
+for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar", []):
     st.subheader(sorgu)
+    if kullanilan and kullanilan.strip() != sorgu.strip():
+        st.caption(f"Aramada kullanılan: `{kullanilan}`")
 
     if hata:
         st.error(f"{sorgu} — {hata}")
@@ -726,7 +811,8 @@ for sorgu, kayitlar, alanlar, hata in st.session_state.get("sonuclar", []):
             sutunlar = st.columns(5)
             for i, kayit in enumerate(grup):
                 with sutunlar[i % 5]:
-                    st.image(kayit["bayt"], use_container_width=True)
+                    st.image(onizleme_yap(kayit["bayt"]),
+                             use_container_width=True)
                     rozet = {"tam": "✓ kod doğrulandı",
                              "kismi": "~ kısmi eşleşme",
                              "yok": "⚠ doğrulanmadı",
@@ -744,11 +830,11 @@ for sorgu, kayitlar, alanlar, hata in st.session_state.get("sonuclar", []):
 
 # --- Hepsini birden indir ---
 sonuclar = st.session_state.get("sonuclar", [])
-toplam = sum(len(k) for _, k, _, _ in sonuclar)
+toplam = sum(len(k) for _, k, _, _, _ in sonuclar)
 if toplam:
     tampon = io.BytesIO()
     with zipfile.ZipFile(tampon, "w", zipfile.ZIP_DEFLATED) as arsiv:
-        for sorgu, kayitlar, _, _ in sonuclar:
+        for sorgu, kayitlar, _, _, _ in sonuclar:
             klasor = re.sub(r"[^A-Za-z0-9._-]+", "_", sorgu).strip("_")[:60] or "urun"
             for i, kayit in enumerate(kayitlar, 1):
                 temiz = re.sub(r"[^a-z0-9]+", "-", kayit["alan"])
