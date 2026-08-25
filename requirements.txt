@@ -1,0 +1,6 @@
+streamlit
+ddgs
+beautifulsoup4
+pillow
+requests
+lxml
