@@ -438,11 +438,15 @@ def arama_motoru():
     return "duckduckgo"
 
 
-def serper_gorsel_ara(sorgu, adet=20):
+def serper_gorsel_ara(sorgu, adet=10):
     """Serper uzerinden Google Gorseller'de arar.
 
     Google'in kendi sonuclarini verir ama Programmable Search'un 50 alan adi
     sinirina takilmaz. Tek anahtar yeter, arama motoru kurmaya gerek yok.
+
+    KREDI: Serper 10 sonuca kadar 1 kredi, 11-100 sonuc icin 2 kredi aliyor.
+    Bu yuzden hep 10 istiyoruz - urun basina 1 kredi. Zaten gorsellerin
+    cogunu bu sayfalarin galerilerinden topluyoruz, 10 aday fazlasiyla yeter.
 
     Doner: [{"gorsel": ..., "sayfa": ..., "baslik": ...}]
     """
@@ -453,7 +457,7 @@ def serper_gorsel_ara(sorgu, adet=20):
         cevap = requests.post(
             "https://google.serper.dev/images",
             headers={"X-API-KEY": anahtar, "Content-Type": "application/json"},
-            json={"q": sorgu, "num": min(int(adet), 100)},
+            json={"q": sorgu, "num": 10},          # 10 = 1 kredi
             timeout=25,
         )
         if cevap.status_code != 200:
@@ -475,19 +479,52 @@ def serper_gorsel_ara(sorgu, adet=20):
     return bulunanlar
 
 
+def google_sonucunu_dogrula(oge, kod):
+    """Google sonucunun gercekten bu kodla ilgisi var mi?
+
+    Sayfa metnini indirmeden bakabilecegimiz uc yer var: gorselin adresi,
+    sayfanin adresi ve baslik. Perakendeciler urun kodunu cogu zaman dosya
+    adina ya da adrese koyuyor. Buralarda kod geciyorsa saglam eslesmedir.
+    """
+    if not kod:
+        return "google"
+    havuz = _sadelestir(" ".join([
+        oge.get("gorsel", ""), oge.get("sayfa", ""), oge.get("baslik", "")]))
+    sade_kod = _sadelestir(kod)
+    if not sade_kod:
+        return "google"
+    if sade_kod in havuz:
+        return "google"
+    uzun_ek = max(8, int(len(sade_kod) * 0.8))
+    if len(sade_kod) > uzun_ek and sade_kod[:uzun_ek] in havuz:
+        return "google"
+    return "google_zayif"
+
+
 def google_var_mi():
     """Gercek bir gorsel arama servisi tanimli mi?"""
     return arama_motoru() != "duckduckgo"
 
 
-def gorsel_arama_yap(sorgu, adet=20):
-    """Tanimli servise gore gorsel aramasi yapar."""
-    motor = arama_motoru()
+# Ayni sorgu tekrar sorulursa krediye dokunmasin diye sayac + onbellek.
+# Katiligi degistirip ayni listeyi yeniden calistirmak bedava olmali.
+_ARAMA_SAYACI = {"toplam": 0}
+
+
+@st.cache_data(show_spinner=False, ttl=7 * 24 * 3600, max_entries=5000)
+def _arama_onbellekli(sorgu, adet, motor):
+    """Gercek arama. Sadece onbellekte YOKSA calisir, yani kredi harcar."""
+    _ARAMA_SAYACI["toplam"] += 1
     if motor == "serper":
         return serper_gorsel_ara(sorgu, adet)
     if motor == "google_cse":
         return google_gorsel_ara(sorgu, adet)
     return []
+
+
+def gorsel_arama_yap(sorgu, adet=10):
+    """Tanimli servise gore gorsel aramasi yapar (onbellekli)."""
+    return _arama_onbellekli(sorgu, adet, arama_motoru())
 
 
 def google_gorsel_ara(sorgu, adet=20):
@@ -607,6 +644,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     else:
         # --- Once Google Gorseller (anahtar tanimliysa)
         google_sorgu = " ".join(x for x in (marka, kod) if x).strip() or ad
+        # Urun basina tek arama = tek kredi
         google_sonuclari = gorsel_arama_yap(google_sorgu) if google_var_mi() else []
 
         if google_sonuclari:
@@ -718,7 +756,21 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     # kullaniyoruz. Google bu kodu zaten urunle eslestirmis; bu bizim sayfa
     # metni kontrolumuzden daha guclu bir kanit.
     if not kayitlar and google_sonuclari:
-        for oge in google_sonuclari:
+        # Google sonuclarini da katiliga gore suzuyoruz. Onceden hepsini
+        # oldugu gibi aliyorduk; kod hicbir yerde gecmese bile geliyorlardi,
+        # bu yuzden farkli urunler karisiyordu.
+        #   siki   : sadece kodu adres/baslikta gecen sonuclar
+        #   orta   : onlar + Google'in ilk 4 sonucu (siralamanin basi guvenilir)
+        #   gevsek : hepsi
+        onaylanan = []
+        for sira_no, oge in enumerate(google_sonuclari):
+            etiket = google_sonucunu_dogrula(oge, kod)
+            if etiket == "google":
+                onaylanan.append((oge, etiket))
+            elif katilik == "gevsek" or (katilik == "orta" and sira_no < 4):
+                onaylanan.append((oge, etiket))
+
+        for oge, etiket in onaylanan:
             if len(kayitlar) >= kac_gorsel:
                 break
             sonuc = gorsel_al(oge.get("gorsel", ""), oturum, en_az=en_kucuk)
@@ -735,7 +787,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 "bayt": bayt, "gen": gen, "yuk": yuk,
                 "alan": re.sub(r"^www\.", "", bulunan[0]) if bulunan else "google",
                 "uzanti": uzanti, "kaynak": sayfa_adresi,
-                "dogrulama": "google",
+                "dogrulama": etiket,
                 "bilgi": {"ad": oge.get("baslik", ""), "marka": "", "renk": "",
                           "kod": "", "aciklama": "", "ozellikler": []},
             })
@@ -830,7 +882,9 @@ with st.sidebar:
     st.header("Ayarlar")
     _motor = arama_motoru()
     if _motor == "serper":
-        st.success("Arama: **Google Görseller**", icon="✅")
+        st.success("Arama: **Google Görseller**\n\n"
+                   "Ürün başına 1 kredi. Aynı ürünü tekrar aratmak "
+                   "**bedava** — sonuçlar 7 gün hafızada tutuluyor.", icon="✅")
     elif _motor == "google_cse":
         st.info("Arama: **Google (50 site sınırlı)**", icon="ℹ️")
     else:
@@ -978,6 +1032,7 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
     oturum = requests.Session()
     oturum.headers.update(BASLIK)
 
+    kredi_basi = _ARAMA_SAYACI["toplam"]
     tum_sonuclar = []
     ilerleme = st.progress(0.0, text="Başlıyor...")
 
@@ -998,6 +1053,20 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
     ilerleme.progress(1.0, text="Bitti")
     ilerleme.empty()
     st.session_state["sonuclar"] = tum_sonuclar
+    st.session_state["kredi"] = (_ARAMA_SAYACI["toplam"] - kredi_basi, len(satirlar))
+
+# --- Kredi kullanimi ---
+if st.session_state.get("kredi") and google_var_mi():
+    _yeni, _urun = st.session_state["kredi"]
+    _hazir = _urun - _yeni
+    if _yeni == 0:
+        st.info(f"Bu çalıştırmada **hiç kredi harcanmadı** — {_urun} ürünün "
+                f"tamamı hafızadan geldi.", icon="💾")
+    elif _hazir > 0:
+        st.info(f"Bu çalıştırmada **{_yeni} kredi** harcandı. "
+                f"{_hazir} ürün hafızadan geldi, onlar bedava.", icon="💾")
+    else:
+        st.caption(f"Bu çalıştırmada {_yeni} kredi harcandı.")
 
 # --- Sonuclari goster ---
 for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar", []):
@@ -1018,7 +1087,7 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
     kismi = sum(1 for k in kayitlar if k.get("dogrulama") == "kismi")
     zayif = sum(1 for k in kayitlar if k.get("dogrulama") == "zayif")
     supheli = sum(1 for k in kayitlar
-                  if k.get("dogrulama") in ("marka", "yok"))
+                  if k.get("dogrulama") in ("marka", "yok", "google_zayif"))
     dagilim = []
     if baglanti:
         dagilim.append(f"{baglanti} verdiğin linkten")
@@ -1033,9 +1102,10 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
     st.caption(f"{len(kayitlar)} görsel · {' · '.join(dagilim)}")
     if supheli:
         st.warning(
-            "Aşağıdaki görsellerde ürün kodu **hiç geçmiyor**, sadece marka adı "
-            "eşleşti. Farklı bir ürün olabilir — kartta ürün adını mutlaka "
-            "kontrol edin.")
+            "Aşağıdaki görsellerin bir kısmında ürün kodu **hiçbir yerde "
+            "doğrulanamadı** — Google'ın sıralamasına güvenilerek alındı. "
+            "Farklı bir ürün olabilir, kartta ürün adını mutlaka kontrol edin. "
+            "Daha temiz sonuç için soldan **Sıkı**'yı seçin.")
     elif zayif:
         st.warning(
             "Kodun tamamı bulunamadı, aynı model ailesinden sayfalara inildi. "
@@ -1089,7 +1159,8 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
                              "kismi": "~ kısmi eşleşme",
                              "zayif": "⚠ aynı model, renk farklı olabilir",
                              "marka": "⚠ sadece marka eşleşti",
-                             "google": "✓ Google eşleşmesi",
+                             "google": "✓ Google + kod eşleşti",
+                             "google_zayif": "⚠ Google sonucu, kod doğrulanmadı",
                              "yok": "⚠ doğrulanmadı",
                              "link": "✓ verdiğin link"}.get(kayit.get("dogrulama"), "")
                     st.caption(f"**{kayit['alan']}**  \n"
