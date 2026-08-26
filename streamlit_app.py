@@ -421,6 +421,122 @@ def onizleme_yap(bayt, kenar=520):
         return bayt
 
 
+def _gizli(anahtar):
+    """Streamlit Secrets'tan deger okur; tanimli degilse bos doner."""
+    try:
+        return str(st.secrets.get(anahtar, "") or "").strip()
+    except Exception:
+        return ""
+
+
+def arama_motoru():
+    """Hangi arama servisi kullanilacak? Iyi olandan kotuye dogru."""
+    if _gizli("serper_api_key"):
+        return "serper"
+    if _gizli("google_api_key") and _gizli("google_cx"):
+        return "google_cse"
+    return "duckduckgo"
+
+
+def serper_gorsel_ara(sorgu, adet=20):
+    """Serper uzerinden Google Gorseller'de arar.
+
+    Google'in kendi sonuclarini verir ama Programmable Search'un 50 alan adi
+    sinirina takilmaz. Tek anahtar yeter, arama motoru kurmaya gerek yok.
+
+    Doner: [{"gorsel": ..., "sayfa": ..., "baslik": ...}]
+    """
+    anahtar = _gizli("serper_api_key")
+    if not anahtar:
+        return []
+    try:
+        cevap = requests.post(
+            "https://google.serper.dev/images",
+            headers={"X-API-KEY": anahtar, "Content-Type": "application/json"},
+            json={"q": sorgu, "num": min(int(adet), 100)},
+            timeout=25,
+        )
+        if cevap.status_code != 200:
+            return []
+        veri = cevap.json()
+    except Exception:
+        return []
+
+    bulunanlar = []
+    for oge in (veri.get("images") or [])[:adet]:
+        gorsel = oge.get("imageUrl") or ""
+        if not gorsel:
+            continue
+        bulunanlar.append({
+            "gorsel": gorsel,
+            "sayfa": oge.get("link") or "",
+            "baslik": (oge.get("title") or "")[:200],
+        })
+    return bulunanlar
+
+
+def google_var_mi():
+    """Gercek bir gorsel arama servisi tanimli mi?"""
+    return arama_motoru() != "duckduckgo"
+
+
+def gorsel_arama_yap(sorgu, adet=20):
+    """Tanimli servise gore gorsel aramasi yapar."""
+    motor = arama_motoru()
+    if motor == "serper":
+        return serper_gorsel_ara(sorgu, adet)
+    if motor == "google_cse":
+        return google_gorsel_ara(sorgu, adet)
+    return []
+
+
+def google_gorsel_ara(sorgu, adet=20):
+    """Google Gorseller'de arar.
+
+    Uzun moda kodlarinda (PMGB02CS26FAB0010810) DuckDuckGo cogu zaman
+    alakasiz sonuc veriyor; Google bu kodlari perakendeci sayfalarindan
+    indekslemis oluyor. Anahtar tanimliysa once buraya soruyoruz.
+
+    Doner: [{"gorsel": ..., "sayfa": ..., "baslik": ...}]
+    """
+    if not google_var_mi():
+        return []
+    anahtar = st.secrets["google_api_key"]
+    kimlik = st.secrets["google_cx"]
+
+    bulunanlar, alinan = [], 0
+    while alinan < adet:
+        parca = min(10, adet - alinan)
+        try:
+            cevap = requests.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params={"key": anahtar, "cx": kimlik, "q": sorgu,
+                        "searchType": "image", "num": parca,
+                        "start": alinan + 1},
+                timeout=20,
+            )
+            if cevap.status_code != 200:
+                break
+            veri = cevap.json()
+        except Exception:
+            break
+
+        ogeler = veri.get("items") or []
+        if not ogeler:
+            break
+        for oge in ogeler:
+            baglam = oge.get("image") or {}
+            bulunanlar.append({
+                "gorsel": oge.get("link", ""),
+                "sayfa": baglam.get("contextLink", ""),
+                "baslik": (oge.get("title") or "")[:200],
+            })
+        alinan += len(ogeler)
+        if len(ogeler) < parca:
+            break
+    return bulunanlar
+
+
 def _tek_arama(sorgu, adet=40):
     """Tek bir arama denemesi. Kutuphane sonuc bulamayinca hata firlatiyor,
     bu yuzden hatayi bos sonuc gibi ele aliyoruz."""
@@ -482,30 +598,52 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     kullanilan_sorgu = ""
 
     # --- Kullanici dogrudan urun linki verdiyse aramaya hic gitmiyoruz
+    google_sonuclari = []
     if link_verildi:
         bulunan = re.findall(r"https?://([^/]+)", link)
         alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else "link"
         aday_sayfalar = [(alan, link)]
         kod = ""                      # link verilmisse dogrulamaya gerek yok
     else:
-        sonuclar, kullanilan_sorgu = ara_kademeli(marka, ad, kod)
-        if not sonuclar:
-            return [], [], ("arama hiçbir sonuç vermedi — ürün sayfasının linkini "
-                            "doğrudan yapıştırmayı deneyin"), ""
+        # --- Once Google Gorseller (anahtar tanimliysa)
+        google_sorgu = " ".join(x for x in (marka, kod) if x).strip() or ad
+        google_sonuclari = gorsel_arama_yap(google_sorgu) if google_var_mi() else []
 
-        # Ihtiyactan cok aday topluyoruz: bir kismi dogrulamayi gecemeyecek
-        aday_sayfalar, gorulen_alan = [], set()
-        for sonuc in sonuclar:
-            adres = sonuc.get("href") or sonuc.get("link") or ""
-            bulunan = re.findall(r"https?://([^/]+)", adres)
-            alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else ""
-            if not alan or alan in gorulen_alan or \
-               any(k in alan for k in ATLANACAK_ALAN):
-                continue
-            gorulen_alan.add(alan)
-            aday_sayfalar.append((alan, adres))
-            if len(aday_sayfalar) >= kac_site * 5:
-                break
+        if google_sonuclari:
+            _ad = {"serper": "Google Görseller",
+                   "google_cse": "Google (sınırlı)"}.get(arama_motoru(), "arama")
+            kullanilan_sorgu = f"{_ad}: {google_sorgu}"
+            aday_sayfalar, gorulen_alan = [], set()
+            for oge in google_sonuclari:
+                adres = oge.get("sayfa") or ""
+                bulunan = re.findall(r"https?://([^/]+)", adres)
+                alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else ""
+                if not alan or alan in gorulen_alan or \
+                   any(k in alan for k in ATLANACAK_ALAN):
+                    continue
+                gorulen_alan.add(alan)
+                aday_sayfalar.append((alan, adres))
+                if len(aday_sayfalar) >= kac_site * 5:
+                    break
+        else:
+            sonuclar, kullanilan_sorgu = ara_kademeli(marka, ad, kod)
+            if not sonuclar:
+                return [], [], ("arama hiçbir sonuç vermedi — ürün sayfasının linkini "
+                                "doğrudan yapıştırmayı deneyin"), ""
+
+            # Ihtiyactan cok aday topluyoruz: bir kismi dogrulamayi gecemeyecek
+            aday_sayfalar, gorulen_alan = [], set()
+            for sonuc in sonuclar:
+                adres = sonuc.get("href") or sonuc.get("link") or ""
+                bulunan = re.findall(r"https?://([^/]+)", adres)
+                alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else ""
+                if not alan or alan in gorulen_alan or \
+                   any(k in alan for k in ATLANACAK_ALAN):
+                    continue
+                gorulen_alan.add(alan)
+                aday_sayfalar.append((alan, adres))
+                if len(aday_sayfalar) >= kac_site * 5:
+                    break
 
     if not aday_sayfalar:
         return [], [], "ürün sayfası bulunamadı", kullanilan_sorgu
@@ -575,6 +713,32 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
             if len(kayitlar) >= kac_gorsel:
                 break
             sayfadan_topla(alan, adres, adaylar, dogrulama, bilgi)
+
+    # Sayfalardan sonuc cikmadiysa Google'in dogrudan eslestirdigi gorselleri
+    # kullaniyoruz. Google bu kodu zaten urunle eslestirmis; bu bizim sayfa
+    # metni kontrolumuzden daha guclu bir kanit.
+    if not kayitlar and google_sonuclari:
+        for oge in google_sonuclari:
+            if len(kayitlar) >= kac_gorsel:
+                break
+            sonuc = gorsel_al(oge.get("gorsel", ""), oturum, en_az=en_kucuk)
+            if not sonuc:
+                continue
+            bayt, gen, yuk, uzanti = sonuc
+            imza = hashlib.sha256(bayt).hexdigest()[:20]
+            if imza in imzalar:
+                continue
+            imzalar.add(imza)
+            sayfa_adresi = oge.get("sayfa", "")
+            bulunan = re.findall(r"https?://([^/]+)", sayfa_adresi)
+            kayitlar.append({
+                "bayt": bayt, "gen": gen, "yuk": yuk,
+                "alan": re.sub(r"^www\.", "", bulunan[0]) if bulunan else "google",
+                "uzanti": uzanti, "kaynak": sayfa_adresi,
+                "dogrulama": "google",
+                "bilgi": {"ad": oge.get("baslik", ""), "marka": "", "renk": "",
+                          "kod": "", "aciklama": "", "ozellikler": []},
+            })
 
     kullanilan = sorted({k["alan"] for k in kayitlar})
     if not kayitlar:
@@ -664,6 +828,20 @@ st.caption("Marka ve ürün kodunu yaz, ürünün geçtiği siteleri bulup görs
 
 with st.sidebar:
     st.header("Ayarlar")
+    _motor = arama_motoru()
+    if _motor == "serper":
+        st.success("Arama: **Google Görseller**", icon="✅")
+    elif _motor == "google_cse":
+        st.info("Arama: **Google (50 site sınırlı)**", icon="ℹ️")
+    else:
+        st.warning(
+            "Arama: **DuckDuckGo**\n\n"
+            "Uzun ürün kodlarında sonuç bulamıyor. Gerçek Google sonuçları için "
+            "[serper.dev](https://serper.dev) üzerinden ücretsiz anahtar alıp "
+            "Streamlit → Settings → Secrets içine ekleyin:\n\n"
+            "```\nserper_api_key = \"...\"\n```",
+            icon="⚠️")
+    st.divider()
     kac_gorsel = st.slider("Ürün başına görsel", 4, 30, 12)
     kac_site = st.slider("Kaç site taransın", 2, 10, 5)
     en_kucuk = st.slider("En küçük görsel (piksel)", 200, 1200, 500, step=50)
@@ -911,6 +1089,7 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
                              "kismi": "~ kısmi eşleşme",
                              "zayif": "⚠ aynı model, renk farklı olabilir",
                              "marka": "⚠ sadece marka eşleşti",
+                             "google": "✓ Google eşleşmesi",
                              "yok": "⚠ doğrulanmadı",
                              "link": "✓ verdiğin link"}.get(kayit.get("dogrulama"), "")
                     st.caption(f"**{kayit['alan']}**  \n"
