@@ -762,12 +762,18 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         #   siki   : sadece kodu adres/baslikta gecen sonuclar
         #   orta   : onlar + Google'in ilk 4 sonucu (siralamanin basi guvenilir)
         #   gevsek : hepsi
+        # Sitelerin cogu urun kodunu adrese koymuyor (Palm Angels koymuyor
+        # mesela). O yuzden "kod adreste gecsin" tek sart olamaz - oyle
+        # yapinca hicbir sonuc kalmiyor. Asil olcut Google'in siralamasi:
+        # ilk sonuclar neredeyse hep dogru urun, kuyruk tarafi kayiyor.
+        #   siki   : ilk 2 sonuc + kodu adreste dogrulananlar
+        #   orta   : ilk 4 sonuc + dogrulananlar
+        #   gevsek : hepsi
+        esik = {"siki": 2, "orta": 4, "gevsek": 10 ** 6}[katilik]
         onaylanan = []
         for sira_no, oge in enumerate(google_sonuclari):
             etiket = google_sonucunu_dogrula(oge, kod)
-            if etiket == "google":
-                onaylanan.append((oge, etiket))
-            elif katilik == "gevsek" or (katilik == "orta" and sira_no < 4):
+            if etiket == "google" or sira_no < esik:
                 onaylanan.append((oge, etiket))
 
         for oge, etiket in onaylanan:
@@ -794,10 +800,14 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
 
     kullanilan = sorted({k["alan"] for k in kayitlar})
     if not kayitlar:
+        if google_sonuclari:
+            neden = ("arama sonuç verdi ama görseller indirilemedi "
+                     "(site engelliyor olabilir)")
+        else:
+            neden = (f"bakılan {len(elenen)} sayfada bu ürüne dair iz yok")
         return [], kullanilan, (
-            f"bulunamadı — bakılan {len(elenen)} sayfanın hiçbirinde bu ürün "
-            f"kodu ya da marka adı geçmiyor. Google'da bulduğunuz ürün "
-            f"sayfasının linkini yapıştırın, oradan çeker."), kullanilan_sorgu
+            f"bulunamadı — {neden}. Ürün sayfasının linkini yapıştırırsanız "
+            f"oradan çeker."), kullanilan_sorgu
     return kayitlar, kullanilan, "", kullanilan_sorgu
 
 
@@ -1160,7 +1170,7 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
                              "zayif": "⚠ aynı model, renk farklı olabilir",
                              "marka": "⚠ sadece marka eşleşti",
                              "google": "✓ Google + kod eşleşti",
-                             "google_zayif": "⚠ Google sonucu, kod doğrulanmadı",
+                             "google_zayif": "~ Google sıralamasından",
                              "yok": "⚠ doğrulanmadı",
                              "link": "✓ verdiğin link"}.get(kayit.get("dogrulama"), "")
                     st.caption(f"**{kayit['alan']}**  \n"
