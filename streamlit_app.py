@@ -583,7 +583,7 @@ def _tek_arama(sorgu, adet=40):
         return []
 
 
-def ara_kademeli(marka, ad, kod):
+def ara_kademeli(marka, ad, kod, renk=""):
     """Sonuc bulana kadar sorguyu kademe kademe degistirir.
 
     Marka ve orijinal kod sabittir; model adi ise sitelere gore degisir
@@ -595,10 +595,15 @@ def ara_kademeli(marka, ad, kod):
         metin = re.sub(r"[/\\|,;]+", " ", metin or "")
         return re.sub(r"\s+", " ", metin).strip()
 
-    marka, ad, kod = temizle(marka), temizle(ad), temizle(kod)
+    marka, ad, kod, renk = (temizle(marka), temizle(ad),
+                            temizle(kod), temizle(renk))
 
     denemeler = []
     if kod:
+        # Ayni kod farkli renklerde olabiliyor. Renk varsa once onu ekliyoruz,
+        # yoksa iki satir birebir ayni sonucu getirir.
+        if renk:
+            denemeler.append(f'{marka} "{kod}" {renk}'.strip())
         if marka:
             denemeler.append(f'{marka} "{kod}"')      # 1. asil yol
         denemeler.append(f'"{kod}"')                  # 2. sadece kod, birebir
@@ -630,6 +635,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     kod = (urun.get("kod") or "").strip()
     marka = (urun.get("marka") or "").strip()
     ad = (urun.get("ad") or "").strip()
+    renk = (urun.get("renk") or "").strip()
     link = (urun.get("url") or "").strip()
     link_verildi = bool(link)
     kullanilan_sorgu = ""
@@ -643,7 +649,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         kod = ""                      # link verilmisse dogrulamaya gerek yok
     else:
         # --- Once Google Gorseller (anahtar tanimliysa)
-        google_sorgu = " ".join(x for x in (marka, kod) if x).strip() or ad
+        google_sorgu = " ".join(x for x in (marka, kod, renk) if x).strip() or ad
         # Urun basina tek arama = tek kredi
         google_sonuclari = gorsel_arama_yap(google_sorgu) if google_var_mi() else []
 
@@ -664,7 +670,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 if len(aday_sayfalar) >= kac_site * 5:
                     break
         else:
-            sonuclar, kullanilan_sorgu = ara_kademeli(marka, ad, kod)
+            sonuclar, kullanilan_sorgu = ara_kademeli(marka, ad, kod, renk)
             if not sonuclar:
                 return [], [], ("arama hiçbir sonuç vermedi — ürün sayfasının linkini "
                                 "doğrudan yapıştırmayı deneyin"), ""
@@ -826,6 +832,8 @@ ALAN_ANAHTARLARI = {
            "modelname", "aciklama", "isim", "name", "title", "adi", "ad",
            "model"),
     "marka": ("markaadi", "marka", "brand", "uretici", "firma", "tedarikci"),
+    "renk": ("renkadi", "renk", "color", "colour", "colore", "renkkodu",
+             "colorway"),
 }
 
 _TURKCE = str.maketrans("ğĞüÜşŞıİöÖçÇ", "gGuUsSiIoOcC")
@@ -957,17 +965,18 @@ with sekme_excel:
                 ad = tahmin.get(alan)
                 return secenek.index(ad) if ad in secenek else varsayilan
 
-            hepsi_bulundu = all(tahmin.get(a) for a in ("kod", "ad", "marka"))
+            hepsi_bulundu = all(tahmin.get(a) for a in ("kod", "marka"))
             ozet_satiri = " · ".join(
                 f"{etiket}: **{tahmin[a]}**"
-                for a, etiket in (("kod", "Kod"), ("ad", "Model"), ("marka", "Marka"))
+                for a, etiket in (("kod", "Kod"), ("ad", "Model"),
+                                  ("marka", "Marka"), ("renk", "Renk"))
                 if tahmin.get(a))
             if ozet_satiri:
                 st.markdown(("✓ " if hepsi_bulundu else "") + ozet_satiri)
 
             # Tahmin tuttuysa acilir menuler kapali durur, ekran kalabalik olmaz
             with st.expander("Sütunları değiştir", expanded=not hepsi_bulundu):
-                s1, s2, s3 = st.columns(3)
+                s1, s2, s3, s4 = st.columns(4)
                 with s1:
                     kod_sutunu = st.selectbox(
                         "Orijinal kod", sutunlar,
@@ -977,6 +986,8 @@ with sekme_excel:
                     ad_sutunu = st.selectbox("Model adı", secenek, index=_sira("ad"))
                 with s3:
                     marka_sutunu = st.selectbox("Marka", secenek, index=_sira("marka"))
+                with s4:
+                    renk_sutunu = st.selectbox("Renk", secenek, index=_sira("renk"))
                 st.dataframe(tablo.head(5), use_container_width=True)
 
             kac_satir = st.number_input("Kaç ürün işlensin", 1, 200,
@@ -996,13 +1007,15 @@ with sekme_excel:
                     "kod": kod_degeri,
                     "marka": _hucre(satir, marka_sutunu),
                     "ad": _hucre(satir, ad_sutunu),
+                    "renk": _hucre(satir, renk_sutunu),
                     "url": "",
                 })
 
             st.success(f"{len(tablo)} satırlık dosyadan {len(satirlar)} ürün hazır.")
             if satirlar:
                 ilk = satirlar[0]
-                st.caption(f"Örnek arama: {ilk['marka']} \"{ilk['kod']}\"".strip()
+                st.caption(f"Örnek arama: {ilk['marka']} \"{ilk['kod']}\" "
+                           f"{ilk.get('renk','')}".strip()
                            + "   ·   model adı yalnızca sonuç çıkmazsa kullanılır")
 
 with sekme_yazi:
@@ -1023,15 +1036,34 @@ with sekme_yazi:
             if not ham:
                 continue
             if re.match(r"https?://", ham):
-                satirlar.append({"kod": "", "marka": "", "ad": "", "url": ham})
+                satirlar.append({"kod": "", "marka": "", "ad": "",
+                                 "renk": "", "url": ham})
                 continue
             # Rakam iceren en uzun parca kod, geri kalani marka sayilir
             kod_p = kodu_ayikla(ham)
             marka_p = " ".join(w for w in ham.split() if w != kod_p)
-            satirlar.append({"kod": kod_p, "marka": marka_p, "ad": "", "url": ""})
+            satirlar.append({"kod": kod_p, "marka": marka_p, "ad": "",
+                             "renk": "", "url": ""})
 
+# Ayni urun listede birden fazla geciyorsa bir kez isliyoruz: bosuna kredi
+# harcanmasin, sonuclarda tekrar cikmasin.
 if satirlar:
-    st.caption(f"{len(satirlar)} ürün işlenecek")
+    _gorulen, _tekil = set(), []
+    for _u in satirlar:
+        # Renk de anahtarin parcasi: ayni orijinal kod farkli renklerde
+        # olabiliyor, bunlar AYRI urun. Rengi katmazsak birini yutardik.
+        _anahtar = (_sadelestir(_u.get("kod", "")),
+                    _sadelestir(_u.get("marka", "")),
+                    _sadelestir(_u.get("renk", "")),
+                    _u.get("url", ""))
+        if _anahtar in _gorulen:
+            continue
+        _gorulen.add(_anahtar)
+        _tekil.append(_u)
+    _tekrar = len(satirlar) - len(_tekil)
+    satirlar = _tekil
+    st.caption(f"{len(satirlar)} ürün işlenecek"
+               + (f" ({_tekrar} tekrar eden satır atlandı)" if _tekrar else ""))
 
 if st.button("Görselleri bul", type="primary", use_container_width=True,
              disabled=not satirlar):
@@ -1048,7 +1080,8 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
 
     for sira, urun in enumerate(satirlar):
         sorgu = (urun.get("url")
-                 or " ".join(x for x in (urun.get("marka"), urun.get("kod")) if x)
+                 or " ".join(x for x in (urun.get("marka"), urun.get("kod"),
+                                         urun.get("renk")) if x)
                  or urun.get("ad") or "ürün")
         ilerleme.progress(sira / len(satirlar), text=f"Aranıyor: {sorgu}")
         try:
@@ -1079,6 +1112,11 @@ if st.session_state.get("kredi") and google_var_mi():
         st.caption(f"Bu çalıştırmada {_yeni} kredi harcandı.")
 
 # --- Sonuclari goster ---
+# Dugme kimliklerini veriden (sorgu+kaynak+sira) turetmek carpisma yaratiyordu:
+# ayni urun listede iki kez gecince iki dugme ayni kimligi aliyor ve Streamlit
+# hata veriyordu. Basit bir sayac bunu tamamen ortadan kaldiriyor.
+_dugme_no = 0
+
 for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar", []):
     st.subheader(sorgu)
     if kullanilan and kullanilan.strip() != sorgu.strip():
@@ -1162,6 +1200,7 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
 
             sutunlar = st.columns(5)
             for i, kayit in enumerate(grup):
+                _dugme_no += 1
                 with sutunlar[i % 5]:
                     st.image(onizleme_yap(kayit["bayt"]),
                              use_container_width=True)
@@ -1181,7 +1220,7 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
                         file_name=f"{re.sub(r'[^A-Za-z0-9._-]+', '_', sorgu)}_"
                                   f"{i + 1:02d}{kayit['uzanti']}",
                         mime=f"image/{kayit['uzanti'].lstrip('.')}",
-                        key=f"tek_{sorgu}_{kaynak}_{i}",
+                        key=f"indir_{_dugme_no}",
                         use_container_width=True,
                     )
 
