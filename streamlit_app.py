@@ -834,6 +834,9 @@ ALAN_ANAHTARLARI = {
     "marka": ("markaadi", "marka", "brand", "uretici", "firma", "tedarikci"),
     "renk": ("renkadi", "renk", "color", "colour", "colore", "renkkodu",
              "colorway"),
+    # Indirilen dosyalara verilecek ad. Sirketin kendi ic numarasi olabilir.
+    "dosya": ("eskimalzemeno", "eskimalzemekodu", "eskimalzeme", "malzemeno",
+              "malzemekodu", "eskikod", "ickod", "dosyaadi"),
 }
 
 _TURKCE = str.maketrans("ğĞüÜşŞıİöÖçÇ", "gGuUsSiIoOcC")
@@ -916,7 +919,9 @@ with st.sidebar:
     st.divider()
     kac_gorsel = st.slider("Ürün başına görsel", 4, 30, 12)
     kac_site = st.slider("Kaç site taransın", 2, 10, 5)
-    en_kucuk = st.slider("En küçük görsel (piksel)", 200, 1200, 500, step=50)
+    en_kucuk = st.slider("En küçük görsel (piksel)", 400, 2000, 1000, step=100,
+                         help="Görselin hem eni hem boyu bu değerden büyük "
+                              "olmalı. Daha küçükleri hiç indirilmez.")
 
     st.divider()
     st.subheader("Eşleşme katılığı")
@@ -969,7 +974,8 @@ with sekme_excel:
             ozet_satiri = " · ".join(
                 f"{etiket}: **{tahmin[a]}**"
                 for a, etiket in (("kod", "Kod"), ("ad", "Model"),
-                                  ("marka", "Marka"), ("renk", "Renk"))
+                                  ("marka", "Marka"), ("renk", "Renk"),
+                                  ("dosya", "Dosya adı"))
                 if tahmin.get(a))
             if ozet_satiri:
                 st.markdown(("✓ " if hepsi_bulundu else "") + ozet_satiri)
@@ -988,6 +994,11 @@ with sekme_excel:
                     marka_sutunu = st.selectbox("Marka", secenek, index=_sira("marka"))
                 with s4:
                     renk_sutunu = st.selectbox("Renk", secenek, index=_sira("renk"))
+                dosya_sutunu = st.selectbox(
+                    "Dosya adı olarak kullanılacak sütun (eski malzeme no)",
+                    secenek, index=_sira("dosya"),
+                    help="İndirilen görseller bu sütundaki değerle adlandırılır. "
+                         "Boş bırakılırsa ürün kodu kullanılır.")
                 st.dataframe(tablo.head(5), use_container_width=True)
 
             kac_satir = st.number_input("Kaç ürün işlensin", 1, 200,
@@ -1008,6 +1019,7 @@ with sekme_excel:
                     "marka": _hucre(satir, marka_sutunu),
                     "ad": _hucre(satir, ad_sutunu),
                     "renk": _hucre(satir, renk_sutunu),
+                    "dosya_adi": _hucre(satir, dosya_sutunu),
                     "url": "",
                 })
 
@@ -1037,13 +1049,13 @@ with sekme_yazi:
                 continue
             if re.match(r"https?://", ham):
                 satirlar.append({"kod": "", "marka": "", "ad": "",
-                                 "renk": "", "url": ham})
+                                 "renk": "", "dosya_adi": "", "url": ham})
                 continue
             # Rakam iceren en uzun parca kod, geri kalani marka sayilir
             kod_p = kodu_ayikla(ham)
             marka_p = " ".join(w for w in ham.split() if w != kod_p)
             satirlar.append({"kod": kod_p, "marka": marka_p, "ad": "",
-                             "renk": "", "url": ""})
+                             "renk": "", "dosya_adi": "", "url": ""})
 
 # Ayni urun listede birden fazla geciyorsa bir kez isliyoruz: bosuna kredi
 # harcanmasin, sonuclarda tekrar cikmasin.
@@ -1091,7 +1103,10 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
             # Bir urunde beklenmedik hata cikarsa listenin geri kalani dursun
             kayitlar, alanlar, kullanilan = [], [], ""
             hata = f"beklenmedik hata: {type(sorun).__name__} — {sorun}"
-        tum_sonuclar.append((sorgu, kayitlar, alanlar, hata, kullanilan))
+        # Indirilen dosyalarin adi: eski malzeme no varsa o, yoksa urun kodu
+        _taban = (urun.get("dosya_adi") or "").strip() or (urun.get("kod") or "").strip()
+        _taban = re.sub(r"[^A-Za-z0-9._-]+", "_", _taban).strip("._-") or "urun"
+        tum_sonuclar.append((sorgu, kayitlar, alanlar, hata, kullanilan, _taban))
 
     ilerleme.progress(1.0, text="Bitti")
     ilerleme.empty()
@@ -1117,7 +1132,7 @@ if st.session_state.get("kredi") and google_var_mi():
 # hata veriyordu. Basit bir sayac bunu tamamen ortadan kaldiriyor.
 _dugme_no = 0
 
-for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar", []):
+for sorgu, kayitlar, alanlar, hata, kullanilan, taban in st.session_state.get("sonuclar", []):
     st.subheader(sorgu)
     if kullanilan and kullanilan.strip() != sorgu.strip():
         st.caption(f"Aramada kullanılan: `{kullanilan}`")
@@ -1166,6 +1181,9 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
     for kayit in kayitlar:
         gruplar.setdefault(kayit["kaynak"], []).append(kayit)
 
+    # Dosya numarasi her urunde 01'den baslar (dugme kimliginden bagimsiz)
+    _urun_sira = 0
+
     for kaynak, grup in gruplar.items():
         bilgi = grup[0].get("bilgi") or {}
         alan = grup[0]["alan"]
@@ -1200,7 +1218,8 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
 
             sutunlar = st.columns(5)
             for i, kayit in enumerate(grup):
-                _dugme_no += 1
+                _dugme_no += 1      # dugme kimligi: tum sayfada benzersiz
+                _urun_sira += 1     # dosya numarasi: urun icinde sirali
                 with sutunlar[i % 5]:
                     st.image(onizleme_yap(kayit["bayt"]),
                              use_container_width=True)
@@ -1217,8 +1236,7 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
                     st.download_button(
                         "İndir",
                         data=kayit["bayt"],
-                        file_name=f"{re.sub(r'[^A-Za-z0-9._-]+', '_', sorgu)}_"
-                                  f"{i + 1:02d}{kayit['uzanti']}",
+                        file_name=f"{taban}_{_urun_sira:02d}{kayit['uzanti']}",
                         mime=f"image/{kayit['uzanti'].lstrip('.')}",
                         key=f"indir_{_dugme_no}",
                         use_container_width=True,
@@ -1226,15 +1244,13 @@ for sorgu, kayitlar, alanlar, hata, kullanilan in st.session_state.get("sonuclar
 
 # --- Hepsini birden indir ---
 sonuclar = st.session_state.get("sonuclar", [])
-toplam = sum(len(k) for _, k, _, _, _ in sonuclar)
+toplam = sum(len(k) for _, k, _, _, _, _ in sonuclar)
 if toplam:
     tampon = io.BytesIO()
     with zipfile.ZipFile(tampon, "w", zipfile.ZIP_DEFLATED) as arsiv:
-        for sorgu, kayitlar, _, _, _ in sonuclar:
-            klasor = re.sub(r"[^A-Za-z0-9._-]+", "_", sorgu).strip("_")[:60] or "urun"
+        for sorgu, kayitlar, _, _, _, taban in sonuclar:
             for i, kayit in enumerate(kayitlar, 1):
-                temiz = re.sub(r"[^a-z0-9]+", "-", kayit["alan"])
-                arsiv.writestr(f"{klasor}/{i:02d}_{temiz}{kayit['uzanti']}",
+                arsiv.writestr(f"{taban}/{taban}_{i:02d}{kayit['uzanti']}",
                                kayit["bayt"])
 
     st.divider()
