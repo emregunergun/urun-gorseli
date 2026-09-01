@@ -355,6 +355,89 @@ def sayfa_bilgileri(corba, sayfa_url):
     return bilgi
 
 
+# Renk sozlugu. Bir urun sayfasinda cogu zaman TUM renk varyantlarinin
+# gorselleri bulunuyor (AYJE'de tek sayfada 135 gorsel vardi). Dosya adinda
+# renk geciyorsa istemedigimiz renkleri ayiklayabiliyoruz.
+RENK_SOZLUGU = (
+    ("siyah", "black", "noir", "nero"),
+    ("beyaz", "white", "blanc", "bianco", "ecru", "offwhite", "optikbeyaz"),
+    ("lacivert", "navy", "marine", "indigo"),
+    ("mavi", "blue", "bleu", "azur", "turkuaz", "turquoise"),
+    ("yesil", "green", "vert", "haki", "khaki", "mint"),
+    ("kirmizi", "red", "rouge", "bordo", "burgundy", "bordeaux"),
+    ("pembe", "pink", "rose", "fusya", "fuchsia"),
+    ("mor", "purple", "lila", "lilac", "violet", "mauve"),
+    ("sari", "yellow", "jaune", "hardal", "mustard"),
+    ("turuncu", "orange", "somon", "salmon", "coral", "mercan"),
+    ("gri", "grey", "gray", "gris", "antrasit", "anthracite"),
+    ("kahverengi", "brown", "marron", "camel", "taba", "tan", "cikolata"),
+    ("bej", "beige", "krem", "cream", "nude", "tas", "sand", "putty"),
+    ("altin", "gold", "dore", "gumus", "silver"),
+)
+
+# Kisa renk adlari (red, gri, tan...) baska kelimelerin icinde de geciyor
+# ("shaRED", "TANk"), o yuzden onlari sadece tam kelime olarak ariyoruz.
+_RENK_EN_KISA_PARCA = 5
+
+
+def _adres_parcalari(url):
+    """Adresi kelimelere ayirir: .../marisol-balen-siyah_1.jpg -> {marisol,...}"""
+    return set(p for p in re.split(r"[^a-z0-9]+", (url or "").lower()) if p)
+
+
+def renk_anahtarlari(renk):
+    """Istenen rengin dosya adinda gecebilecek karsiliklarini dondurur."""
+    sade = _sadelestir(renk)
+    if not sade:
+        return set()
+    for grup in RENK_SOZLUGU:
+        if any(k in sade for k in grup):
+            return set(grup)
+    return {sade} if len(sade) >= 4 else set()
+
+
+def _renk_gecyor_mu(parcalar, anahtarlar):
+    for a in anahtarlar:
+        if a in parcalar:
+            return True
+        if len(a) >= _RENK_EN_KISA_PARCA and any(a in p for p in parcalar):
+            return True
+    return False
+
+
+def renge_gore_ayikla(adaylar, renk):
+    """Istenen rengin gorsellerini one alir, baska renkleri ayiklar.
+
+    Doner: (siralanmis_adaylar, elenen_sayisi)
+
+    Yalnizca dosya adinda renk yazan sitelerde is goruyor; yazmiyorsa
+    hicbir sey degismez. Istenen renkten hic gorsel bulunamazsa da liste
+    oldugu gibi birakiliyor - eldeki tek sey yanlis renkse bile kullaniciya
+    gostermek, hic gorsel gostermemekten iyi.
+    """
+    istenen = renk_anahtarlari(renk)
+    if not istenen:
+        return adaylar, 0
+    digerleri = set()
+    for grup in RENK_SOZLUGU:
+        digerleri |= set(grup)
+    digerleri -= istenen
+
+    uygun, notr, elenen = [], [], 0
+    for url in adaylar:
+        parcalar = _adres_parcalari(url)
+        if _renk_gecyor_mu(parcalar, istenen):
+            uygun.append(url)
+        elif _renk_gecyor_mu(parcalar, digerleri):
+            elenen += 1
+        else:
+            notr.append(url)
+
+    if not uygun and not notr:
+        return adaylar, 0            # hepsi elenecekti, dokunma
+    return uygun + notr, elenen
+
+
 def urun_sayfasi_mi(corba):
     """Bu bir URUN sayfasi mi, yoksa koleksiyon/liste sayfasi mi?
 
@@ -1053,6 +1136,12 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         if kullanilan_site >= kac_site or len(kayitlar) >= kac_gorsel:
             break
         adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka, ad)
+        # Urun sayfasinda cogu zaman butun renkler bir arada duruyor.
+        # Dosya adinda renk yazan sitelerde istemedigimiz renkleri ayikliyoruz.
+        adaylar, _renk_elenen = renge_gore_ayikla(adaylar, renk)
+        if _renk_elenen:
+            _not(f"     · {_renk_elenen} görsel başka renk olduğu için ayıklandı "
+                 f"(istenen: {renk})")
         _not(f"Sayfa: **{alan}** → {len(adaylar)} görsel adayı, "
              f"doğrulama: `{dogrulama}` "
              f"({'kabul' if dogrulama in kabul else 'RET — ' + katilik + ' modda kabul edilmiyor'})")
