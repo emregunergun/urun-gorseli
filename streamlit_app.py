@@ -355,7 +355,42 @@ def sayfa_bilgileri(corba, sayfa_url):
     return bilgi
 
 
-def sayfa_gorselleri(sayfa_url, oturum, kod="", marka=""):
+def urun_sayfasi_mi(corba):
+    """Bu bir URUN sayfasi mi, yoksa koleksiyon/liste sayfasi mi?
+
+    Urun sayfalari yapisal veride Product nesnesi ya da og:type=product
+    tasir; koleksiyon sayfalari tasimaz. Bu ayrimi yapamazsak markanin
+    "Fall/Winter 2026" gibi bir liste sayfasindan 238 alakasiz gorsel
+    cekmemiz isten degil.
+    """
+    try:
+        if _json_ld_urunler(corba):
+            return True
+    except Exception:
+        pass
+    for etiket in corba.find_all("meta"):
+        if etiket.get("property") == "og:type" and \
+           "product" in (etiket.get("content") or "").lower():
+            return True
+    return False
+
+
+def ad_sayfada_gecyor_mu(metin, ad):
+    """Model adinin ayirt edici kelimesi sayfada geciyor mu?
+
+    "Marisol BALEN TOP V BOTTOM" icinde ayirt edici olan marisol/balen;
+    top, bottom, bikini gibi kelimeler her mayoda geciyor, onlari saymiyoruz.
+    """
+    kelimeler = [_sadelestir(p) for p in re.split(r"[\s/&,._-]+", ad or "") if p]
+    kelimeler = [p for p in kelimeler
+                 if len(p) >= 4 and p not in GENEL_KELIMELER]
+    if not kelimeler:
+        return False
+    sade = _sadelestir(metin)
+    return any(k in sade for k in kelimeler)
+
+
+def sayfa_gorselleri(sayfa_url, oturum, kod="", marka="", ad=""):
     """Sayfadaki gorselleri, kod dogrulamasini ve urun bilgilerini dondurur."""
     try:
         cevap = oturum.get(sayfa_url, timeout=15)
@@ -379,6 +414,17 @@ def sayfa_gorselleri(sayfa_url, oturum, kod="", marka=""):
         bilgi = sayfa_bilgileri(corba, sayfa_url)
     except Exception:
         bilgi = {}
+
+    # Bazi markalar tedarikci kodunu kendi sitelerine hic yazmiyor (AYJE
+    # gibi). O zaman kod dogrulamasi "marka"da takiliyor ve dogru urun
+    # sayfasi eleniyor. Uc sart birden saglanirsa bunu "ad" kademesi
+    # sayiyoruz: marka tutuyor + model adinin ayirt edici kelimesi sayfada
+    # geciyor + sayfa gercekten bir URUN sayfasi (koleksiyon listesi degil).
+    if dogrulama == "marka" and ad and \
+            ad_sayfada_gecyor_mu(_gercek_adres + " " + cevap.text, ad) and \
+            urun_sayfasi_mi(corba):
+        dogrulama = "ad"
+
     adaylar, gorulen = [], set()
 
     def ekle(ham):
@@ -966,9 +1012,11 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     # "yok" hicbir modda kabul edilmez: o sayfada ne urun kodu ne marka adi
     # geciyor demektir, urunle alakasi yoktur. Arama motoru uzun kodlarda
     # bambaska sayfalar getirebiliyor; buradan geri donuyoruz.
+    # "ad": kod sayfada yok ama marka + model adi tutuyor ve sayfa bir urun
+    # sayfasi. Bu "marka"dan belirgin sekilde guclu, o yuzden orta kabul eder.
     KADEMELER = {"siki": {"tam"},
-                 "orta": {"tam", "kismi"},
-                 "gevsek": {"tam", "kismi", "zayif", "marka"}}
+                 "orta": {"tam", "kismi", "ad"},
+                 "gevsek": {"tam", "kismi", "ad", "zayif", "marka"}}
     kabul = KADEMELER[katilik]
     # Linki kullanici verdiyse dogrulamaya gerek yok - sayfayi zaten o secti
     if link_verildi:
@@ -1004,7 +1052,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         # Cop sonuclar ilk siralari kaplasa bile gercek urun sayfasina ulasiriz.
         if kullanilan_site >= kac_site or len(kayitlar) >= kac_gorsel:
             break
-        adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka)
+        adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka, ad)
         _not(f"Sayfa: **{alan}** → {len(adaylar)} görsel adayı, "
              f"doğrulama: `{dogrulama}` "
              f"({'kabul' if dogrulama in kabul else 'RET — ' + katilik + ' modda kabul edilmiyor'})")
@@ -1016,7 +1064,8 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
             # iner. Sadece marka adi gecen sayfa (koleksiyon listesi olabilir)
             # ya da hicbir izi olmayan sayfa yedege alinmaz - kullanici
             # isterse "Gevsek" secerek onlari acikca isteyebilir.
-            if adaylar and dogrulama in ("kismi", "zayif") and len(yedekler) < kac_site:
+            if adaylar and dogrulama in ("kismi", "ad", "zayif") \
+                    and len(yedekler) < kac_site:
                 yedekler.append((alan, adres, adaylar, dogrulama, bilgi))
             continue
         kullanilan_site += 1
@@ -1030,7 +1079,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     # Kullaniciyi "ayari gevsetin" diye geri gondermek yerine kendimiz
     # gevsetip sonucu acikca etiketliyoruz.
     if not kayitlar and yedekler:
-        sira = {"tam": 0, "kismi": 1, "zayif": 2, "marka": 3}
+        sira = {"tam": 0, "kismi": 1, "ad": 2, "zayif": 3, "marka": 4}
         for alan, adres, adaylar, dogrulama, bilgi in sorted(
                 yedekler, key=lambda y: sira.get(y[3], 9)):
             if len(kayitlar) >= kac_gorsel:
@@ -1611,6 +1660,7 @@ for _satir in st.session_state.get("sonuclar", []):
                              use_container_width=True)
                     rozet = {"tam": "✓ kod doğrulandı",
                              "kismi": "~ kısmi eşleşme",
+                             "ad": "✓ marka + model adı eşleşti",
                              "zayif": "⚠ aynı model, renk farklı olabilir",
                              "marka": "⚠ sadece marka eşleşti",
                              "google": "✓ Google + kod eşleşti",
