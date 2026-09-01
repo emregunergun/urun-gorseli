@@ -593,11 +593,39 @@ def sonuc_puani(sonuclar, kod, marka):
     if not kod and not marka:
         return YETERLI_PUAN          # olcecek bir sey yok, geleni kabul et
     puan = 0
+    # Kod puani: bu sonuclar gercekten BU urune mi ait?
+    puan = kod_eslesme_puani(sonuclar, kod)
+
+    # Marka puani TAVANLI. Tavan olmadan markanin 10 koleksiyon sayfasi
+    # (10 puan) tek gercek kod eslesmesini (6 puan) yeniyor ve yanlis deneme
+    # kazanan secilliyordu.
+    if marka:
+        puan += min(sum(1 for oge in sonuclar[:10] if marka_izi_var(oge, marka)),
+                    MARKA_PUAN_TAVANI)
+    return puan
+
+
+def kod_eslesme_puani(sonuclar, kod):
+    """Yalnizca URUN KODU eslesmelerinden gelen puan.
+
+    sonuc_puani marka eslesmelerini de sayiyor - hangi denemenin daha iyi
+    oldugunu secmek icin bu dogru. Ama "yeterince eminim, aramayi birakayim"
+    kararini marka eslesmesiyle vermek yanlis: markanin koleksiyon sayfasi
+    ("Fall/Winter 2026 | American Vintage") 10 sonucun 10'unda cikip puani
+    doldurabiliyor, biz de dogru urunu buldugumuzu sanip duruyoruz. Halbuki
+    o sayfalarda urun yok. Aramayi ancak KOD tuttugunda birakiyoruz.
+    """
+    if not kod or not sonuclar:
+        return 0
+    sade_kod = _sadelestir(kod)
+    puan = 0
     for oge in sonuclar[:10]:
-        if kod and google_sonucunu_dogrula(oge, kod) == "google":
+        havuz = _sadelestir(" ".join([
+            oge.get("gorsel", ""), oge.get("sayfa", ""), oge.get("baslik", "")]))
+        if sade_kod and sade_kod in havuz:
+            puan += YETERLI_PUAN
+        elif google_sonucunu_dogrula(oge, kod) == "google":
             puan += 3
-        elif marka and marka_izi_var(oge, marka):
-            puan += 1
     return puan
 
 
@@ -605,6 +633,9 @@ def sonuc_puani(sonuclar, kod, marka):
 # harciyoruz; ulasamazsak sorguyu zenginlestirip bir daha deniyoruz.
 YETERLI_PUAN = 6
 EN_FAZLA_DENEME = 3
+# Marka eslesmelerinin toplayabilecegi en yuksek puan. Yeterli puanin
+# altinda kalmali ki marka tek basina "buldum" dedirtemesin.
+MARKA_PUAN_TAVANI = 3
 
 
 def google_var_mi():
@@ -809,16 +840,30 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 _sayac += 1
                 _bulunan = gorsel_arama_yap(_deneme)
                 _puan = sonuc_puani(_bulunan, kod, marka)
+                _kod_puan = kod_eslesme_puani(_bulunan, kod)
                 _not(f"Sorgu {_sayac}: `{_deneme}` → **{len(_bulunan)} sonuç**, "
-                     f"puan {_puan} (yeterli: {YETERLI_PUAN})")
+                     f"puan {_puan}"
+                     + (f" (bunun {_kod_puan}'i koddan)" if kod else "")
+                     + f" — durmak için koddan {YETERLI_PUAN} gerek")
                 for _s in _bulunan[:5]:
                     _not(f"     · {alan_adi(_s.get('sayfa','')) or '?'} — "
                          f"{(_s.get('baslik') or '')[:70]}")
                 if _puan > _en_iyi_puan:
                     _en_iyi_puan = _puan
                     google_sonuclari, google_sorgu = _bulunan, _deneme
-                if _en_iyi_puan >= YETERLI_PUAN:
-                    _not("   → puan yeterli, başka sorgu denenmedi")
+                # Durma karari SADECE kod eslesmesine bakar. Marka eslesmesi
+                # "bu markanin bir sayfasi" demektir, "bu urun" demek degil.
+                if kod:
+                    _yeter = _kod_puan >= YETERLI_PUAN
+                elif marka:
+                    # Kod yoksa marka tek olcutumuz; burada tavan uygulanmaz,
+                    # yoksa kodsuz urunler bosuna ikinci kez aranir.
+                    _yeter = sum(1 for _o in _bulunan
+                                 if marka_izi_var(_o, marka)) >= YETERLI_PUAN
+                else:
+                    _yeter = bool(_bulunan)
+                if _yeter:
+                    _not("   → kod doğrulandı, başka sorgu denenmedi")
                     break               # emin olduk, fazladan kredi harcama
 
         if google_sonuclari:
