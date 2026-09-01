@@ -533,6 +533,15 @@ def sayfa_gorselleri(sayfa_url, oturum, kod="", marka="", ad=""):
         for parca in re.findall(r'"([^"\s]+\.(?:jpg|jpeg|png|webp)[^"\s]*)"', metin, re.I):
             ekle(parca.replace("\\/", "/"))
 
+    # Buraya kadar toplananlar URUNUN KENDI GALERISI: paylasim gorseli
+    # (og:image) ve yapisal veride yazan gorseller. Bunlar sayfanin sahibi
+    # tarafindan "bu urunun fotograflari" diye isaretlenmis olanlar.
+    galeri_sayisi = len(adaylar)
+
+    # Bundan sonrakiler sayfadaki DIGER resimler: "benzer urunler",
+    # "bunu da begenebilirsiniz", koleksiyon seritleri... Ayni sayfada 128
+    # gorsel cikmasinin sebebi bunlar ve cogu baska urun, baska renk.
+    # Listede tutuyoruz ama galeri bos kalmadikca kullanmiyoruz.
     for resim in corba.find_all("img"):
         if resim.get("srcset"):
             ekle(_srcset_en_buyuk(resim["srcset"]))
@@ -542,6 +551,7 @@ def sayfa_gorselleri(sayfa_url, oturum, kod="", marka="", ad=""):
                 ekle(resim[alan])
                 break
 
+    bilgi["galeri_sayisi"] = galeri_sayisi
     return adaylar, dogrulama, bilgi
 
 
@@ -1136,12 +1146,22 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         if kullanilan_site >= kac_site or len(kayitlar) >= kac_gorsel:
             break
         adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka, ad)
-        # Urun sayfasinda cogu zaman butun renkler bir arada duruyor.
+
+        # Once URUNUN KENDI GALERISI, sonra sayfadaki diger resimler.
+        # Ayirmazsak "benzer urunler" seridindeki baska renkler geliyordu.
+        _galeri_n = bilgi.get("galeri_sayisi", 0)
+        _galeri, _digerleri = adaylar[:_galeri_n], adaylar[_galeri_n:]
+
         # Dosya adinda renk yazan sitelerde istemedigimiz renkleri ayikliyoruz.
-        adaylar, _renk_elenen = renge_gore_ayikla(adaylar, renk)
-        if _renk_elenen:
-            _not(f"     · {_renk_elenen} görsel başka renk olduğu için ayıklandı "
+        _galeri, _e1 = renge_gore_ayikla(_galeri, renk)
+        _digerleri, _e2 = renge_gore_ayikla(_digerleri, renk)
+        adaylar = _galeri + _digerleri
+        if _e1 + _e2:
+            _not(f"     · {_e1 + _e2} görsel başka renk olduğu için ayıklandı "
                  f"(istenen: {renk})")
+        if _galeri and _digerleri:
+            _not(f"     · ürünün kendi galerisi: {len(_galeri)} görsel "
+                 f"(sayfadaki diğer {len(_digerleri)} resim yedekte)")
         _not(f"Sayfa: **{alan}** → {len(adaylar)} görsel adayı, "
              f"doğrulama: `{dogrulama}` "
              f"({'kabul' if dogrulama in kabul else 'RET — ' + katilik + ' modda kabul edilmiyor'})")
@@ -1158,9 +1178,17 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 yedekler.append((alan, adres, adaylar, dogrulama, bilgi))
             continue
         kullanilan_site += 1
-        _eklendi = sayfadan_topla(alan, adres, adaylar, dogrulama, bilgi)
+        # Yalnizca urunun kendi galerisinden topluyoruz. Galeriden hic gorsel
+        # cikmazsa (site yapisal veri yazmiyorsa) sayfadaki diger resimlere
+        # iniyoruz - yoksa o sitelerden hic gorsel alamayiz.
+        _kaynak = _galeri if _galeri else _digerleri
+        _eklendi = sayfadan_topla(alan, adres, _kaynak, dogrulama, bilgi)
+        if not _eklendi and _galeri and _digerleri:
+            _not("     · galeriden görsel çıkmadı, sayfadaki diğer resimlere bakılıyor")
+            _kaynak = _digerleri
+            _eklendi = sayfadan_topla(alan, adres, _kaynak, dogrulama, bilgi)
         _not(f"     · {_eklendi} görsel alındı "
-             f"({len(adaylar) - _eklendi} tanesi {en_kucuk}px altı, "
+             f"({len(_kaynak) - _eklendi} tanesi {en_kucuk}px altı, "
              f"kopya ya da indirilemedi)")
         time.sleep(0.4)
 
