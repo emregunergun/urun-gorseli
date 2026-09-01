@@ -483,71 +483,35 @@ def arama_motoru():
     return "duckduckgo"
 
 
-# Aramalar Turkiye yerelinde yapiliyor. Ekip Turkiye'den bakiyor ve urunleri
-# satan siteler cogunlukla Turk perakendecileri (Vakko, Beymen, Rubaiyat...).
-# Varsayilan ABD yereliyle arayinca bu sayfalar sonuclara hic girmiyordu:
-# "MYKO02CE26ORTIE" Turkiye'de ilk sirada Vakko'yu veriyor, ABD'de hicbir sey.
-ARAMA_ULKE = "tr"
-ARAMA_DIL = "tr"
-
-
-def serper_ara(sorgu, tur="gorsel", adet=10):
-    """Serper uzerinden Google'da arar. tur: "gorsel" | "web"
+def serper_gorsel_ara(sorgu, adet=10):
+    """Serper uzerinden Google Gorseller'de arar.
 
     Google'in kendi sonuclarini verir ama Programmable Search'un 50 alan adi
     sinirina takilmaz. Tek anahtar yeter, arama motoru kurmaya gerek yok.
 
-    NEDEN IKI TUR: Gorsel aramasi bir sayfayi ancak gorselleri indekslenmisse
-    getirir. Uzun urun kodlarinda web aramasi cok daha isabetli - kod sayfa
-    metninde birebir gectigi icin Google onu ilk siraya koyuyor. Kod varsa
-    once web aramasi yapip cikan urun sayfalarinin galerisini kaziyoruz.
-
-    KREDI: iki uc nokta da 10 sonuca kadar 1 kredi (11-100 icin 2 kredi).
-    Bu yuzden hep 10 istiyoruz.
+    KREDI: Serper 10 sonuca kadar 1 kredi, 11-100 sonuc icin 2 kredi aliyor.
+    Bu yuzden hep 10 istiyoruz - urun basina 1 kredi. Zaten gorsellerin
+    cogunu bu sayfalarin galerilerinden topluyoruz, 10 aday fazlasiyla yeter.
 
     Doner: [{"gorsel": ..., "sayfa": ..., "baslik": ...}]
     """
     anahtar = _gizli("serper_api_key")
     if not anahtar:
         return []
-    yol = "search" if tur == "web" else "images"
-
-    def _iste(govde):
-        try:
-            cevap = requests.post(
-                f"https://google.serper.dev/{yol}",
-                headers={"X-API-KEY": anahtar, "Content-Type": "application/json"},
-                json=govde, timeout=25,
-            )
-            if cevap.status_code != 200:
-                return None
-            return cevap.json()
-        except Exception:
-            return None
-
-    # 10 sonuc = 1 kredi. Once Turkiye yereliyle deniyoruz.
-    veri = _iste({"q": sorgu, "num": 10, "gl": ARAMA_ULKE, "hl": ARAMA_DIL})
-    if veri is None:
-        # Yerel parametreler reddedilirse sade istekle tekrar dene; boylece
-        # servis tarafinda bir degisiklik olursa uygulama bos donmez.
-        veri = _iste({"q": sorgu, "num": 10})
-    if veri is None:
+    try:
+        cevap = requests.post(
+            "https://google.serper.dev/images",
+            headers={"X-API-KEY": anahtar, "Content-Type": "application/json"},
+            json={"q": sorgu, "num": 10},          # 10 = 1 kredi
+            timeout=25,
+        )
+        if cevap.status_code != 200:
+            return []
+        veri = cevap.json()
+    except Exception:
         return []
 
     bulunanlar = []
-    if tur == "web":
-        for oge in (veri.get("organic") or [])[:adet]:
-            adres = oge.get("link") or ""
-            if not adres:
-                continue
-            # Ozet metni de basliga katiyoruz: urun kodu cogu zaman orada
-            # geciyor ve dogrulamada isimize yariyor.
-            baslik = " ".join([oge.get("title") or "", oge.get("snippet") or ""])
-            bulunanlar.append({
-                "gorsel": "", "sayfa": adres, "baslik": baslik[:400],
-            })
-        return bulunanlar
-
     for oge in (veri.get("images") or [])[:adet]:
         gorsel = oge.get("imageUrl") or ""
         if not gorsel:
@@ -622,17 +586,10 @@ def sonuc_puani(sonuclar, kod, marka):
         return 0
     if not kod and not marka:
         return YETERLI_PUAN          # olcecek bir sey yok, geleni kabul et
-    sade_kod = _sadelestir(kod)
     puan = 0
     for oge in sonuclar[:10]:
-        havuz = _sadelestir(" ".join([
-            oge.get("gorsel", ""), oge.get("sayfa", ""), oge.get("baslik", "")]))
-        if sade_kod and sade_kod in havuz:
-            # Kodun tamami geciyor. Tek boyle sonuc bile yeter - baska bir
-            # urunun sayfasinda bu kodun aynen gecmesi neredeyse imkansiz.
-            puan += YETERLI_PUAN
-        elif kod and google_sonucunu_dogrula(oge, kod) == "google":
-            puan += 3                # kisaltilmis / govde eslesmesi
+        if kod and google_sonucunu_dogrula(oge, kod) == "google":
+            puan += 3
         elif marka and marka_izi_var(oge, marka):
             puan += 1
     return puan
@@ -655,24 +612,19 @@ _ARAMA_SAYACI = {"toplam": 0}
 
 
 @st.cache_data(show_spinner=False, ttl=7 * 24 * 3600, max_entries=5000)
-def _arama_onbellekli(sorgu, adet, motor, tur):
+def _arama_onbellekli(sorgu, adet, motor):
     """Gercek arama. Sadece onbellekte YOKSA calisir, yani kredi harcar."""
     _ARAMA_SAYACI["toplam"] += 1
     if motor == "serper":
-        return serper_ara(sorgu, tur, adet)
+        return serper_gorsel_ara(sorgu, adet)
     if motor == "google_cse":
-        return google_gorsel_ara(sorgu, adet)   # CSE'de web aramasi yok
+        return google_gorsel_ara(sorgu, adet)
     return []
 
 
-def arama_turunu_ayarla(tur):
-    """Web aramasini yalnizca Serper destekliyor; digerleri gorsele duser."""
-    return tur if arama_motoru() == "serper" else "gorsel"
-
-
-def gorsel_arama_yap(sorgu, adet=10, tur="gorsel"):
-    """Tanimli servise gore arama yapar (onbellekli). tur: "gorsel" | "web" """
-    return _arama_onbellekli(sorgu, adet, arama_motoru(), arama_turunu_ayarla(tur))
+def gorsel_arama_yap(sorgu, adet=10):
+    """Tanimli servise gore gorsel aramasi yapar (onbellekli)."""
+    return _arama_onbellekli(sorgu, adet, arama_motoru())
 
 
 def google_gorsel_ara(sorgu, adet=20):
@@ -790,38 +742,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     kullanilan_sorgu = ""
 
     # --- Kullanici dogrudan urun linki verdiyse aramaya hic gitmiyoruz
-    google_sonuclari, google_sorgu = [], ""
-    # Sorgu metnini sadelestirir: bolme isaretlerini ve fazla bosluklari atar.
-    _temiz = lambda m: re.sub(r"\s+", " ", re.sub(r"[/\\|,;]+", " ", m or "")).strip()
-
-    _web_durumu = {"denendi": False}
-
-    def web_aday_sayfalar():
-        """Normal Google (web) aramasiyla aday urun sayfalari bulur.
-
-        Gorsel aramasi bir sayfayi ancak gorselleri indekslenmisse getirir.
-        Bazi urun kodlari yalnizca sayfa METNINDE geciyor - "MYKO02CE26ORTIE"
-        normal Google'da ilk sirada Vakko'yu veriyor ama gorsel aramasinda
-        hicbir sey cikmiyor.
-
-        Bu yuzden web aramasi yedek yoldur: gorsel aramasi bos dondugunde ya
-        da bulduklarindan gorsel cikmadiginda devreye girer. Urun basina en
-        fazla bir kez calisir, yani fazladan kredi yalnizca baska turlu bos
-        donecek urunler icin gider.
-        """
-        if _web_durumu["denendi"] or not kod or arama_motoru() != "serper":
-            return [], ""
-        _web_durumu["denendi"] = True
-        sorgu = _temiz(f"{marka} {kod}")
-        sayfalar, gorulen = [], set()
-        for oge in gorsel_arama_yap(sorgu, tur="web"):
-            adres = oge.get("sayfa") or ""
-            alan = alan_adi(adres)
-            if alan in gorulen or alan_yasakli(adres):
-                continue
-            gorulen.add(alan)
-            sayfalar.append((alan, adres))
-        return sayfalar, (f"Google: {sorgu}" if sayfalar else "")
+    google_sonuclari = []
     if link_verildi:
         bulunan = re.findall(r"https?://([^/]+)", link)
         alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else "link"
@@ -841,21 +762,19 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         #
         # Tek istisna: ayni kod listede birden fazla renkte varsa renk basa
         # aliniyor, yoksa iki satira ayni gorseller gelir.
-        # Denemeler. Hepsi GORSEL aramasi - bu yol denenmis ve calisiyor.
-        # Normal (web) Google aramasi en sona, son care olarak birakildi:
-        # ancak hicbir sey bulunamadiginda devreye giriyor. Boylece calisan
-        # hicbir sey bozulmuyor ama "MYKO02CE26ORTIE" gibi yalnizca sayfa
-        # metninde gecen kodlar da yakalanabiliyor.
+        _temiz = lambda m: re.sub(r"\s+", " ", re.sub(r"[/\\|,;]+", " ", m or "")).strip()
         _denemeler = []
         if kod:
             if renk_gerekli and renk:
                 _denemeler.append(_temiz(f"{marka} {kod} {renk}"))
             _denemeler.append(_temiz(f"{marka} {kod}"))
-            # Koda yapisik renk adi varsa ayrilmis hali de denenir.
+            # Koda yapisik renk adi varsa ayrilmis hali. Bitisik yazilan kod
+            # internette hicbir yerde gecmiyor, ayrilmis hali geciyor.
             _govde = kod_govdesi(kod)
             if _govde:
                 _ek = _sadelestir(kod)[len(_govde):]
                 _denemeler.append(_temiz(f"{marka} {_govde} {_ek}"))
+                _denemeler.append(_temiz(f"{marka} {_govde}"))
             if renk:
                 _denemeler.append(_temiz(f"{marka} {kod} {renk}"))
             if ad:
@@ -869,7 +788,6 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         if google_var_mi():
             _gorulen_deneme, _sayac = set(), 0
             _en_iyi_puan = -1
-            _bos_kelime = None          # son bos donen sorgunun kelime sayisi
             for _deneme in _denemeler:
                 if not _deneme or _deneme in _gorulen_deneme:
                     continue
@@ -877,17 +795,9 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                     break
                 _gorulen_deneme.add(_deneme)
                 _sayac += 1
-                # Bir onceki deneme HIC sonuc vermediyse daha uzun bir sorgu
-                # denemek bosuna kredi harcamak olur - uzun sorgu her zaman
-                # daha az sonuc verir. Sadece daha kisa sorgulara iniyoruz.
-                if _bos_kelime is not None and len(_deneme.split()) >= _bos_kelime:
-                    continue
-                _bulunan = gorsel_arama_yap(_deneme, tur="gorsel")
-                _bos_kelime = len(_deneme.split()) if not _bulunan else None
+                _bulunan = gorsel_arama_yap(_deneme)
                 _puan = sonuc_puani(_bulunan, kod, marka)
-                # Esitlikte dolu sonuc bos sonucu yener.
-                if _puan > _en_iyi_puan or (
-                        _puan == _en_iyi_puan and _bulunan and not google_sonuclari):
+                if _puan > _en_iyi_puan:
                     _en_iyi_puan = _puan
                     google_sonuclari, google_sorgu = _bulunan, _deneme
                 if _en_iyi_puan >= YETERLI_PUAN:
@@ -908,20 +818,14 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 if len(aday_sayfalar) >= kac_site * 5:
                     break
         else:
-            # Gorsel aramasi bos dondu. Once normal Google aramasini deniyoruz
-            # (kod sayfa metninde geciyor olabilir), o da vermezse DuckDuckGo.
-            aday_sayfalar, kullanilan_sorgu = web_aday_sayfalar()
-            if aday_sayfalar:
-                sonuclar = None
-            else:
-                sonuclar, kullanilan_sorgu = ara_kademeli(marka, ad, kod, renk)
-                if not sonuclar:
-                    return [], [], ("arama hiçbir sonuç vermedi — ürün sayfasının "
-                                    "linkini doğrudan yapıştırmayı deneyin"), ""
+            sonuclar, kullanilan_sorgu = ara_kademeli(marka, ad, kod, renk)
+            if not sonuclar:
+                return [], [], ("arama hiçbir sonuç vermedi — ürün sayfasının linkini "
+                                "doğrudan yapıştırmayı deneyin"), ""
 
             # Ihtiyactan cok aday topluyoruz: bir kismi dogrulamayi gecemeyecek
-            gorulen_alan = set()
-            for sonuc in (sonuclar or []):
+            aday_sayfalar, gorulen_alan = [], set()
+            for sonuc in sonuclar:
                 adres = sonuc.get("href") or sonuc.get("link") or ""
                 alan = alan_adi(adres)
                 if alan in gorulen_alan or alan_yasakli(adres):
@@ -970,47 +874,35 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                              "bilgi": bilgi})
         return eklenen
 
-    _site_sayaci = [kullanilan_site]
+    for alan, adres in aday_sayfalar:
+        # Dogrulamayi gecemeyen sayfa site hakkini harcamaz; siradakine bakariz.
+        # Cop sonuclar ilk siralari kaplasa bile gercek urun sayfasina ulasiriz.
+        if kullanilan_site >= kac_site or len(kayitlar) >= kac_gorsel:
+            break
+        adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka)
+        if dogrulama not in kabul:
+            elenen.append(alan)
+            # Otomatik gevsetme yalnizca kodun izinin bulundugu sayfalara
+            # iner. Sadece marka adi gecen sayfa (koleksiyon listesi olabilir)
+            # ya da hicbir izi olmayan sayfa yedege alinmaz - kullanici
+            # isterse "Gevsek" secerek onlari acikca isteyebilir.
+            if adaylar and dogrulama in ("kismi", "zayif") and len(yedekler) < kac_site:
+                yedekler.append((alan, adres, adaylar, dogrulama, bilgi))
+            continue
+        kullanilan_site += 1
+        sayfadan_topla(alan, adres, adaylar, dogrulama, bilgi)
+        time.sleep(0.4)
 
-    def sayfalari_tara(sayfa_listesi):
-        """Verilen sayfalari gezip dogrulamayi gecenlerden gorsel toplar."""
-        for alan, adres in sayfa_listesi:
-            # Dogrulamayi gecemeyen sayfa site hakkini harcamaz; siradakine
-            # bakariz. Cop sonuclar ilk siralari kaplasa bile gercek urun
-            # sayfasina ulasiriz.
-            if _site_sayaci[0] >= kac_site or len(kayitlar) >= kac_gorsel:
-                break
-            adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka)
-            if dogrulama not in kabul:
-                elenen.append(alan)
-                # Otomatik gevsetme yalnizca kodun izinin bulundugu sayfalara
-                # iner. Sadece marka adi gecen sayfa (koleksiyon listesi
-                # olabilir) ya da hicbir izi olmayan sayfa yedege alinmaz -
-                # kullanici isterse "Gevsek" secerek onlari acikca isteyebilir.
-                if adaylar and dogrulama in ("kismi", "zayif") and len(yedekler) < kac_site:
-                    yedekler.append((alan, adres, adaylar, dogrulama, bilgi))
-                continue
-            _site_sayaci[0] += 1
-            sayfadan_topla(alan, adres, adaylar, dogrulama, bilgi)
-            time.sleep(0.4)
-
-    def yedekleri_kullan():
-        """Secilen katilikta sonuc cikmadiysa elenenlere geri doner.
-
-        Kullaniciyi "ayari gevsetin" diye geri gondermek yerine kendimiz
-        gevsetip sonucu acikca etiketliyoruz.
-        """
-        if kayitlar or not yedekler:
-            return
+    # Secilen katilikta hic sonuc cikmadiysa elenenlere geri donuyoruz.
+    # Kullaniciyi "ayari gevsetin" diye geri gondermek yerine kendimiz
+    # gevsetip sonucu acikca etiketliyoruz.
+    if not kayitlar and yedekler:
         sira = {"tam": 0, "kismi": 1, "zayif": 2, "marka": 3}
         for alan, adres, adaylar, dogrulama, bilgi in sorted(
                 yedekler, key=lambda y: sira.get(y[3], 9)):
             if len(kayitlar) >= kac_gorsel:
                 break
             sayfadan_topla(alan, adres, adaylar, dogrulama, bilgi)
-
-    sayfalari_tara(aday_sayfalar)
-    yedekleri_kullan()
 
     # Sayfalardan sonuc cikmadiysa Google'in dogrudan eslestirdigi gorselleri
     # kullaniyoruz. Google bu kodu zaten urunle eslestirmis; bu bizim sayfa
@@ -1066,26 +958,6 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 "bilgi": {"ad": oge.get("baslik", ""), "marka": "", "renk": "",
                           "kod": "", "aciklama": "", "ozellikler": []},
             })
-
-    # SON CARE: normal Google (web) aramasi.
-    #
-    # Gorsel aramasi bir sayfayi ancak gorselleri indekslenmisse getirir.
-    # Bazi kodlar yalnizca sayfa METNINDE geciyor - "MYKO02CE26ORTIE" normal
-    # Google'da ilk sirada Vakko'yu veriyor ama gorsel aramasinda hicbir sey
-    # cikmiyor. Bu yuzden buraya kadar hicbir sey bulunamadiysa bir de web
-    # aramasi yapip cikan urun sayfalarinin galerisini kaziyoruz.
-    #
-    # Yalnizca bos donecek urunlerde calisir; yani fazladan kredi sadece
-    # zaten sonuc vermeyen urunler icin gider.
-    if not kayitlar and not link_verildi:
-        _web_sayfalar, _web_etiket = web_aday_sayfalar()
-        if _web_sayfalar:
-            # Elimiz bos oldugu icin site hakkini sifirdan aciyoruz.
-            _site_sayaci[0] = 0
-            kullanilan_sorgu = (f"{kullanilan_sorgu}  ·  {_web_etiket}"
-                                if kullanilan_sorgu else _web_etiket)
-            sayfalari_tara(_web_sayfalar)
-            yedekleri_kullan()
 
     kullanilan = sorted({k["alan"] for k in kayitlar})
     if not kayitlar:
@@ -1186,12 +1058,12 @@ with st.sidebar:
     st.header("Ayarlar")
     _motor = arama_motoru()
     if _motor == "serper":
-        st.success("Arama: **Google Görseller** (Türkiye)\n\n"
-                   "*Marka + orijinal kod* ile aranıyor — çoğu üründe 1 "
-                   "kredi. Bulunamazsa renk/model adı eklenmiş sorgular ve "
-                   "son çare olarak normal Google araması deneniyor. "
+        st.success("Arama: **Google Görseller**\n\n"
+                   "Önce *marka + orijinal kod* aranıyor — çoğu üründe bu "
+                   "yetiyor, 1 kredi. Sonuçlar tutmazsa sorguya renk ve "
+                   "model adı eklenip tekrar aranıyor (en fazla 3 deneme). "
                    "Aynı ürünü tekrar aratmak **bedava** — sonuçlar 7 gün "
-                   "hafızada.", icon="✅")
+                   "hafızada tutuluyor.", icon="✅")
     elif _motor == "google_cse":
         st.info("Arama: **Google (50 site sınırlı)**", icon="ℹ️")
     else:
