@@ -1001,20 +1001,19 @@ with sekme_excel:
                          "Boş bırakılırsa ürün kodu kullanılır.")
                 st.dataframe(tablo.head(5), use_container_width=True)
 
-            kac_satir = st.number_input("Kaç ürün işlensin", 1, 200,
-                                        min(20, len(tablo)))
-
             def _hucre(satir, sutun):
                 if sutun == yok:
                     return ""
                 deger = str(satir.get(sutun, "") or "").strip()
                 return "" if deger.lower() in ("nan", "none") else deger
 
-            for _, satir in tablo.head(int(kac_satir)).iterrows():
+            # Dosyadaki gecerli urunler (kodu olanlar)
+            adaylar = []
+            for _sira, satir in tablo.iterrows():
                 kod_degeri = _hucre(satir, kod_sutunu)
                 if not kod_degeri:
                     continue
-                satirlar.append({
+                adaylar.append({
                     "kod": kod_degeri,
                     "marka": _hucre(satir, marka_sutunu),
                     "ad": _hucre(satir, ad_sutunu),
@@ -1023,12 +1022,71 @@ with sekme_excel:
                     "url": "",
                 })
 
-            st.success(f"{len(tablo)} satırlık dosyadan {len(satirlar)} ürün hazır.")
-            if satirlar:
-                ilk = satirlar[0]
-                st.caption(f"Örnek arama: {ilk['marka']} \"{ilk['kod']}\" "
-                           f"{ilk.get('renk','')}".strip()
-                           + "   ·   model adı yalnızca sonuç çıkmazsa kullanılır")
+            if not adaylar:
+                st.warning("Dosyada ürün kodu olan satır bulunamadı. "
+                           "Sütun eşleştirmesini kontrol edin.")
+            else:
+                st.markdown(f"**İşlenecek ürünleri seçin** ({len(adaylar)} ürün)")
+
+                d1, d2, _bosluk = st.columns([1, 1, 4])
+                if d1.button("Tümünü seç", use_container_width=True):
+                    st.session_state.pop("urun_secimi", None)
+                    st.session_state["_hepsi_secili"] = True
+                if d2.button("Temizle", use_container_width=True):
+                    st.session_state.pop("urun_secimi", None)
+                    st.session_state["_hepsi_secili"] = False
+
+                import pandas as pd
+                _varsayilan = st.session_state.get("_hepsi_secili", False)
+                gosterim = pd.DataFrame({
+                    "Seç": [_varsayilan] * len(adaylar),
+                    "Dosya adı": [u["dosya_adi"] for u in adaylar],
+                    "Orijinal kod": [u["kod"] for u in adaylar],
+                    "Model": [u["ad"] for u in adaylar],
+                    "Marka": [u["marka"] for u in adaylar],
+                    "Renk": [u["renk"] for u in adaylar],
+                })
+
+                duzenlenmis = st.data_editor(
+                    gosterim,
+                    key="urun_secimi",
+                    hide_index=True,
+                    use_container_width=True,
+                    height=min(420, 80 + 35 * len(adaylar)),
+                    column_config={
+                        "Seç": st.column_config.CheckboxColumn(
+                            "Seç", help="İşlenecek ürünleri işaretleyin",
+                            default=False, width="small"),
+                    },
+                    disabled=["Dosya adı", "Orijinal kod", "Model", "Marka", "Renk"],
+                )
+
+                satirlar = [u for u, secili in zip(adaylar, duzenlenmis["Seç"])
+                            if bool(secili)]
+
+                if satirlar:
+                    _n = len(satirlar)
+                    # Gorseller bellekte tutuluyor; cok urun secilirse ucretsiz
+                    # sunucunun bellegi dolup uygulama yeniden baslayabiliyor.
+                    _sure = f"~{max(1, _n // 2)}-{_n} dakika"
+                    if _n > 50:
+                        st.error(f"{_n} ürün çok fazla. Uygulama bellek yetersizliğinden "
+                                 f"yarıda kesilebilir. **En fazla 30 ürün** seçip "
+                                 f"birkaç turda yapmanızı öneririm.")
+                    elif _n > 30:
+                        st.warning(f"{_n} ürün seçildi ({_n} kredi, {_sure}). "
+                                   f"30'un üstü riskli olabilir; sorun yaşarsanız "
+                                   f"daha küçük gruplara bölün.")
+                    else:
+                        st.success(f"{_n} ürün seçildi · {_n} kredi · {_sure}")
+                else:
+                    st.info("Henüz ürün seçilmedi. Tablodan işaretleyin ya da "
+                            "**Tümünü seç**'e basın.")
+                if satirlar:
+                    ilk = satirlar[0]
+                    st.caption(f"Örnek arama: {ilk['marka']} \"{ilk['kod']}\" "
+                               f"{ilk.get('renk','')}".strip()
+                               + "   ·   model adı yalnızca sonuç çıkmazsa kullanılır")
 
 with sekme_yazi:
     girdi = st.text_area(
