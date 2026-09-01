@@ -88,6 +88,18 @@ ATLANACAK_ALAN = (
 UZANTI_TAMAM = (".jpg", ".jpeg", ".png", ".webp")
 
 
+def alan_adi(adres):
+    """Adresten alan adini cikarir. www. onekini atar."""
+    bulunan = re.findall(r"https?://([^/]+)", adres or "")
+    return re.sub(r"^www\.", "", bulunan[0]).lower() if bulunan else ""
+
+
+def alan_yasakli(adres):
+    """Bu adres kara listedeki bir siteye mi ait?"""
+    alan = alan_adi(adres)
+    return (not alan) or any(k in alan for k in ATLANACAK_ALAN)
+
+
 # ----------------------------------------------------------------------------
 # Gorsel cikarma
 # ----------------------------------------------------------------------------
@@ -501,6 +513,56 @@ def google_sonucunu_dogrula(oge, kod):
     return "google_zayif"
 
 
+def marka_izi_var(oge, marka):
+    """Sonucun adresinde ya da basliginda marka adindan bir iz var mi?
+
+    Kisa ve genel kodlarda ("A-129-S56") Google birebir eslesme bulamayinca
+    icinde ayni rakamlar gecen bambaska bir urunu getirebiliyor - mesela bir
+    Audi yedek parcasini (06E129629Q). Sirasina guvenip aldigimiz sonuclarda
+    en azindan marka adinin gecmesini sart kosuyoruz. Marka bilinmiyorsa bu
+    kontrol atlanir.
+    """
+    if not marka:
+        return True
+    havuz = _sadelestir(" ".join([
+        oge.get("gorsel", ""), oge.get("sayfa", ""), oge.get("baslik", "")]))
+    # "Palm Angels" -> palm / angels. Parcalardan biri gecerse yeter; siteler
+    # markayi bitisik, ayri ya da kisaltarak yazabiliyor.
+    parcalar = [_sadelestir(p) for p in re.split(r"[\s/&,._-]+", marka) if p]
+    parcalar = [p for p in parcalar if len(p) >= 3]
+    if not parcalar:
+        return True
+    return any(p in havuz for p in parcalar)
+
+
+def sonuc_puani(sonuclar, kod, marka):
+    """Arama sonuclari bu urune ne kadar uyuyor?
+
+    Google bos donmese bile alakasiz seyler dondurebiliyor, o yuzden
+    "sonuc geldi mi" yetmez; "gelen sonuclar tutuyor mu" diye bakiyoruz.
+      kod adreste/baslikta geciyor : 3 puan (saglam)
+      sadece marka geciyor         : 1 puan (idare eder)
+    Puan yetersizse sorguyu zenginlestirip (renk, model adi) tekrar ariyoruz.
+    """
+    if not sonuclar:
+        return 0
+    if not kod and not marka:
+        return YETERLI_PUAN          # olcecek bir sey yok, geleni kabul et
+    puan = 0
+    for oge in sonuclar[:10]:
+        if kod and google_sonucunu_dogrula(oge, kod) == "google":
+            puan += 3
+        elif marka and marka_izi_var(oge, marka):
+            puan += 1
+    return puan
+
+
+# Iki saglam eslesme (2x3) ya da dengi. Bu puana ulasinca durup krediyi
+# harciyoruz; ulasamazsak sorguyu zenginlestirip bir daha deniyoruz.
+YETERLI_PUAN = 6
+EN_FAZLA_DENEME = 3
+
+
 def google_var_mi():
     """Gercek bir gorsel arama servisi tanimli mi?"""
     return arama_motoru() != "duckduckgo"
@@ -650,31 +712,51 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         kod = ""                      # link verilmisse dogrulamaya gerek yok
     else:
         # --- Once Google Gorseller (anahtar tanimliysa)
-        # Sorguyu kisa tutuyoruz: marka + kod cogu urunu tek basina buluyor.
-        # Renk yalnizca AYNI kod listede birden fazla renkte varsa ekleniyor;
-        # aksi halde "adidas ID1481 Brown Putty Grey Gold Metallic" gibi uzun
-        # sorgular Google'da sifir sonuc veriyor.
+        #
+        # Kademeli sorgu. Once en sade ve en ayirt edici hali deniyoruz:
+        # marka + orijinal kod. Kod dunya capinda tek oldugu icin bu cogu
+        # urunu tek basina buluyor ve tek kredi harciyor.
+        #
+        # Sonuclar tutmuyorsa (bkz. sonuc_puani) sorguyu zenginlestiriyoruz:
+        # once renk, sonra model adi ekleniyor. Bunu bastan yapmiyoruz cunku
+        # "adidas ID1481 Brown Putty Grey Gold Metallic" gibi uzun sorgular
+        # Google'da sifir sonuc veriyor - uzun sorgu ise yarar degil zarar.
+        #
+        # Tek istisna: ayni kod listede birden fazla renkte varsa renk basa
+        # aliniyor, yoksa iki satira ayni gorseller gelir.
         _temiz = lambda m: re.sub(r"\s+", " ", re.sub(r"[/\\|,;]+", " ", m or "")).strip()
         _denemeler = []
         if kod:
             if renk_gerekli and renk:
                 _denemeler.append(_temiz(f"{marka} {kod} {renk}"))
             _denemeler.append(_temiz(f"{marka} {kod}"))
+            if renk:
+                _denemeler.append(_temiz(f"{marka} {kod} {renk}"))
+            if ad:
+                _denemeler.append(_temiz(f"{marka} {ad} {renk}"))
             _denemeler.append(_temiz(kod))
         else:
+            _denemeler.append(_temiz(f"{marka} {ad} {renk}"))
             _denemeler.append(_temiz(f"{marka} {ad}"))
 
         google_sorgu, google_sonuclari = "", []
         if google_var_mi():
-            _gorulen_deneme = set()
+            _gorulen_deneme, _sayac = set(), 0
+            _en_iyi_puan = -1
             for _deneme in _denemeler:
                 if not _deneme or _deneme in _gorulen_deneme:
                     continue
-                _gorulen_deneme.add(_deneme)
-                google_sonuclari = gorsel_arama_yap(_deneme)
-                if google_sonuclari:
-                    google_sorgu = _deneme
+                if _sayac >= EN_FAZLA_DENEME:
                     break
+                _gorulen_deneme.add(_deneme)
+                _sayac += 1
+                _bulunan = gorsel_arama_yap(_deneme)
+                _puan = sonuc_puani(_bulunan, kod, marka)
+                if _puan > _en_iyi_puan:
+                    _en_iyi_puan = _puan
+                    google_sonuclari, google_sorgu = _bulunan, _deneme
+                if _en_iyi_puan >= YETERLI_PUAN:
+                    break               # emin olduk, fazladan kredi harcama
 
         if google_sonuclari:
             _ad = {"serper": "Google Görseller",
@@ -683,10 +765,8 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
             aday_sayfalar, gorulen_alan = [], set()
             for oge in google_sonuclari:
                 adres = oge.get("sayfa") or ""
-                bulunan = re.findall(r"https?://([^/]+)", adres)
-                alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else ""
-                if not alan or alan in gorulen_alan or \
-                   any(k in alan for k in ATLANACAK_ALAN):
+                alan = alan_adi(adres)
+                if alan in gorulen_alan or alan_yasakli(adres):
                     continue
                 gorulen_alan.add(alan)
                 aday_sayfalar.append((alan, adres))
@@ -702,10 +782,8 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
             aday_sayfalar, gorulen_alan = [], set()
             for sonuc in sonuclar:
                 adres = sonuc.get("href") or sonuc.get("link") or ""
-                bulunan = re.findall(r"https?://([^/]+)", adres)
-                alan = re.sub(r"^www\.", "", bulunan[0]) if bulunan else ""
-                if not alan or alan in gorulen_alan or \
-                   any(k in alan for k in ATLANACAK_ALAN):
+                alan = alan_adi(adres)
+                if alan in gorulen_alan or alan_yasakli(adres):
                     continue
                 gorulen_alan.add(alan)
                 aday_sayfalar.append((alan, adres))
@@ -798,11 +876,21 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         #   siki   : ilk 2 sonuc + kodu adreste dogrulananlar
         #   orta   : ilk 4 sonuc + dogrulananlar
         #   gevsek : hepsi
+        # Kara liste burada da gecerli. Onceden sadece sayfa gezme yolunda
+        # bakiliyordu; bu yol Google'in verdigi gorseli dogrudan indirdigi
+        # icin aliexpress gibi siteler suzgecten kaciyordu.
+        temiz_sonuclar = [o for o in google_sonuclari
+                          if not alan_yasakli(o.get("sayfa", ""))]
+
         esik = {"siki": 2, "orta": 4, "gevsek": 10 ** 6}[katilik]
         onaylanan = []
-        for sira_no, oge in enumerate(google_sonuclari):
+        for sira_no, oge in enumerate(temiz_sonuclar):
             etiket = google_sonucunu_dogrula(oge, kod)
-            if etiket == "google" or sira_no < esik:
+            if etiket == "google":
+                onaylanan.append((oge, etiket))
+            elif sira_no < esik and marka_izi_var(oge, marka):
+                # Kod hicbir yerde gecmiyor; sadece siralamaya guveniyoruz.
+                # O zaman en azindan marka adi gecsin.
                 onaylanan.append((oge, etiket))
 
         for oge, etiket in onaylanan:
@@ -817,10 +905,9 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 continue
             imzalar.add(imza)
             sayfa_adresi = oge.get("sayfa", "")
-            bulunan = re.findall(r"https?://([^/]+)", sayfa_adresi)
             kayitlar.append({
                 "bayt": bayt, "gen": gen, "yuk": yuk,
-                "alan": re.sub(r"^www\.", "", bulunan[0]) if bulunan else "google",
+                "alan": alan_adi(sayfa_adresi) or "google",
                 "uzanti": uzanti, "kaynak": sayfa_adresi,
                 "dogrulama": etiket,
                 "bilgi": {"ad": oge.get("baslik", ""), "marka": "", "renk": "",
@@ -830,8 +917,8 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     kullanilan = sorted({k["alan"] for k in kayitlar})
     if not kayitlar:
         if google_sonuclari:
-            neden = ("arama sonuç verdi ama görseller indirilemedi "
-                     "(site engelliyor olabilir)")
+            neden = ("arama sonuç verdi ama hiçbiri bu ürüne uymadı ya da "
+                     "görseller indirilemedi")
         else:
             neden = (f"bakılan {len(elenen)} sayfada bu ürüne dair iz yok")
         return [], kullanilan, (
@@ -927,8 +1014,11 @@ with st.sidebar:
     _motor = arama_motoru()
     if _motor == "serper":
         st.success("Arama: **Google Görseller**\n\n"
-                   "Ürün başına 1 kredi. Aynı ürünü tekrar aratmak "
-                   "**bedava** — sonuçlar 7 gün hafızada tutuluyor.", icon="✅")
+                   "Önce *marka + orijinal kod* aranıyor — çoğu üründe bu "
+                   "yetiyor, 1 kredi. Sonuçlar tutmazsa sorguya renk ve "
+                   "model adı eklenip tekrar aranıyor (en fazla 3 deneme). "
+                   "Aynı ürünü tekrar aratmak **bedava** — sonuçlar 7 gün "
+                   "hafızada tutuluyor.", icon="✅")
     elif _motor == "google_cse":
         st.info("Arama: **Google (50 site sınırlı)**", icon="ℹ️")
     else:
@@ -1097,11 +1187,11 @@ with sekme_excel:
                                  f"yarıda kesilebilir. **En fazla 30 ürün** seçip "
                                  f"birkaç turda yapmanızı öneririm.")
                     elif _n > 30:
-                        st.warning(f"{_n} ürün seçildi ({_n} kredi, {_sure}). "
+                        st.warning(f"{_n} ürün seçildi (~{_n} kredi, {_sure}). "
                                    f"30'un üstü riskli olabilir; sorun yaşarsanız "
                                    f"daha küçük gruplara bölün.")
                     else:
-                        st.success(f"{_n} ürün seçildi · {_n} kredi · {_sure}")
+                        st.success(f"{_n} ürün seçildi · ~{_n} kredi · {_sure}")
                 else:
                     st.info("Henüz ürün seçilmedi. Tablodan işaretleyin ya da "
                             "**Tümünü seç**'e basın.")
@@ -1206,13 +1296,16 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
 # --- Kredi kullanimi ---
 if st.session_state.get("kredi") and google_var_mi():
     _yeni, _urun = st.session_state["kredi"]
-    _hazir = _urun - _yeni
     if _yeni == 0:
         st.info(f"Bu çalıştırmada **hiç kredi harcanmadı** — {_urun} ürünün "
                 f"tamamı hafızadan geldi.", icon="💾")
-    elif _hazir > 0:
-        st.info(f"Bu çalıştırmada **{_yeni} kredi** harcandı. "
-                f"{_hazir} ürün hafızadan geldi, onlar bedava.", icon="💾")
+    elif _yeni < _urun:
+        st.info(f"{_urun} ürün için **{_yeni} kredi** harcandı — kalanlar "
+                f"hafızadan geldi, onlar bedava.", icon="💾")
+    elif _yeni > _urun:
+        st.info(f"{_urun} ürün için **{_yeni} kredi** harcandı. Bazı ürünlerde "
+                f"ilk arama tutmadığı için sorguya renk/model adı eklenip "
+                f"tekrar arandı.", icon="💾")
     else:
         st.caption(f"Bu çalıştırmada {_yeni} kredi harcandı.")
 
