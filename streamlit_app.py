@@ -624,7 +624,8 @@ def ara_kademeli(marka, ad, kod, renk=""):
     return [], ""
 
 
-def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"):
+def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta",
+                    renk_gerekli=False):
     """Tek bir urun icin gorselleri toplar.
 
     katilik:
@@ -649,9 +650,31 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         kod = ""                      # link verilmisse dogrulamaya gerek yok
     else:
         # --- Once Google Gorseller (anahtar tanimliysa)
-        google_sorgu = " ".join(x for x in (marka, kod, renk) if x).strip() or ad
-        # Urun basina tek arama = tek kredi
-        google_sonuclari = gorsel_arama_yap(google_sorgu) if google_var_mi() else []
+        # Sorguyu kisa tutuyoruz: marka + kod cogu urunu tek basina buluyor.
+        # Renk yalnizca AYNI kod listede birden fazla renkte varsa ekleniyor;
+        # aksi halde "adidas ID1481 Brown Putty Grey Gold Metallic" gibi uzun
+        # sorgular Google'da sifir sonuc veriyor.
+        _temiz = lambda m: re.sub(r"\s+", " ", re.sub(r"[/\\|,;]+", " ", m or "")).strip()
+        _denemeler = []
+        if kod:
+            if renk_gerekli and renk:
+                _denemeler.append(_temiz(f"{marka} {kod} {renk}"))
+            _denemeler.append(_temiz(f"{marka} {kod}"))
+            _denemeler.append(_temiz(kod))
+        else:
+            _denemeler.append(_temiz(f"{marka} {ad}"))
+
+        google_sorgu, google_sonuclari = "", []
+        if google_var_mi():
+            _gorulen_deneme = set()
+            for _deneme in _denemeler:
+                if not _deneme or _deneme in _gorulen_deneme:
+                    continue
+                _gorulen_deneme.add(_deneme)
+                google_sonuclari = gorsel_arama_yap(_deneme)
+                if google_sonuclari:
+                    google_sorgu = _deneme
+                    break
 
         if google_sonuclari:
             _ad = {"serper": "Google Görseller",
@@ -1145,6 +1168,13 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
     oturum.headers.update(BASLIK)
 
     kredi_basi = _ARAMA_SAYACI["toplam"]
+    # Ayni marka+kod listede birden fazla kez geciyorsa (farkli renkler)
+    # rengi aramaya katmamiz gerekiyor, aksi halde ikisi ayni sonucu getirir.
+    _kod_sayaci = {}
+    for _u in satirlar:
+        _ik = (_sadelestir(_u.get("marka", "")), _sadelestir(_u.get("kod", "")))
+        _kod_sayaci[_ik] = _kod_sayaci.get(_ik, 0) + 1
+
     tum_sonuclar = []
     ilerleme = st.progress(0.0, text="Başlıyor...")
 
@@ -1155,8 +1185,10 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
                  or urun.get("ad") or "ürün")
         ilerleme.progress(sira / len(satirlar), text=f"Aranıyor: {sorgu}")
         try:
+            _ik = (_sadelestir(urun.get("marka", "")), _sadelestir(urun.get("kod", "")))
             kayitlar, alanlar, hata, kullanilan = urun_gorselleri(
-                urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik)
+                urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik,
+                renk_gerekli=_kod_sayaci.get(_ik, 1) > 1)
         except Exception as sorun:
             # Bir urunde beklenmedik hata cikarsa listenin geri kalani dursun
             kayitlar, alanlar, kullanilan = [], [], ""
