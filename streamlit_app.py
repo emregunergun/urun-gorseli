@@ -579,7 +579,7 @@ def marka_izi_var(oge, marka):
     return any(p in havuz for p in parcalar)
 
 
-def sonuc_puani(sonuclar, kod, marka):
+def sonuc_puani(sonuclar, kod, marka, ad=""):
     """Arama sonuclari bu urune ne kadar uyuyor?
 
     Google bos donmese bile alakasiz seyler dondurebiliyor, o yuzden
@@ -602,6 +602,10 @@ def sonuc_puani(sonuclar, kod, marka):
     if marka:
         puan += min(sum(1 for oge in sonuclar[:10] if marka_izi_var(oge, marka)),
                     MARKA_PUAN_TAVANI)
+
+    # Model adi / resmi magaza sinyali. Kod tutmadiginda hangi denemenin
+    # dogru yeri buldugunu ayirt eden sey bu.
+    puan += ad_eslesme_puani(sonuclar, ad, marka)
     return puan
 
 
@@ -636,6 +640,59 @@ EN_FAZLA_DENEME = 3
 # Marka eslesmelerinin toplayabilecegi en yuksek puan. Yeterli puanin
 # altinda kalmali ki marka tek basina "buldum" dedirtemesin.
 MARKA_PUAN_TAVANI = 3
+# Model adi / resmi magaza sinyalinin toplayabilecegi en yuksek puan.
+AD_PUAN_TAVANI = 4
+
+# Model adindaki ayirt edici OLMAYAN kelimeler. "Marisol U SWIMSUIT" icinde
+# ayirt edici olan "marisol"; "swimsuit" her mayoda geciyor, eslesirse yanlis
+# yonlendirir (alakasiz bir "Black Swimsuit" sonucu puan kazanirdi).
+GENEL_KELIMELER = {
+    # giyim turleri
+    "mayo", "bikini", "swimsuit", "swimwear", "tshirt", "shirt", "gomlek",
+    "elbise", "dress", "pantolon", "pants", "jean", "denim", "ceket",
+    "jacket", "kazak", "sweater", "jumper", "sweatshirt", "hoodie", "canta",
+    "bag", "backpack", "ayakkabi", "shoes", "sneaker", "terlik", "sandalet",
+    "bornoz", "sort", "shorts", "etek", "skirt", "bluz", "tunik", "takim",
+    "takimi", "yaka", "kollu", "clog", "coat", "mont", "parka", "trench",
+    # cinsiyet / genel
+    "kadin", "erkek", "unisex", "women", "womens", "woman", "mens", "kids",
+    "cocuk", "bebek", "child", "girls", "boys",
+    # renkler
+    "siyah", "beyaz", "mavi", "yesil", "kirmizi", "sari", "lacivert", "gri",
+    "pembe", "mor", "kahverengi", "bej", "black", "white", "blue", "green",
+    "red", "yellow", "navy", "grey", "gray", "pink", "brown", "beige",
+}
+
+
+def ad_eslesme_puani(sonuclar, ad, marka):
+    """Model adi ve "markanin kendi magazasi" sinyalinden gelen puan.
+
+    Kisa ve genel kodlarda ("A-129-7") kod eslesmesi ise yaramiyor: Google
+    icinde 129 gecen Kuran ayetini ya da ucak kuyruk numarasini getirebiliyor.
+    Boyle durumlarda iki saglam ipucu kaliyor:
+
+      1. Model adinin ayirt edici kelimesi baslikta geciyor mu?
+         ("Marisol U Yaka Mayo" -> marisol tutuyor)
+      2. Sonucun alan adi markanin kendi magazasi mi? (ayjeshop.com)
+
+    Bu puan yalnizca HANGI DENEMENIN daha iyi oldugunu secerken kullanilir;
+    "aramayi birak" karari hala sadece koda bakar.
+    """
+    if not sonuclar:
+        return 0
+    kelimeler = [_sadelestir(p) for p in re.split(r"[\s/&,._-]+", ad or "") if p]
+    kelimeler = [p for p in kelimeler
+                 if len(p) >= 4 and p not in GENEL_KELIMELER]
+    sade_marka = _sadelestir(marka)
+    puan = 0
+    for oge in sonuclar[:10]:
+        baslik = _sadelestir(oge.get("baslik", ""))
+        alan = _sadelestir(alan_adi(oge.get("sayfa", "")))
+        if kelimeler and any(k in baslik for k in kelimeler):
+            puan += 2
+        if sade_marka and len(sade_marka) >= 3 and sade_marka in alan:
+            puan += 2
+    return min(puan, AD_PUAN_TAVANI)
 
 
 def google_var_mi():
@@ -839,7 +896,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 _gorulen_deneme.add(_deneme)
                 _sayac += 1
                 _bulunan = gorsel_arama_yap(_deneme)
-                _puan = sonuc_puani(_bulunan, kod, marka)
+                _puan = sonuc_puani(_bulunan, kod, marka, ad)
                 _kod_puan = kod_eslesme_puani(_bulunan, kod)
                 _not(f"Sorgu {_sayac}: `{_deneme}` → **{len(_bulunan)} sonuç**, "
                      f"puan {_puan}"
