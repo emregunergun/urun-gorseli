@@ -1503,7 +1503,7 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
             hata = f"beklenmedik hata: {type(sorun).__name__} — {sorun}"
         # Indirilen dosyalarin adi: eski malzeme no varsa o, yoksa urun kodu
         _taban = (urun.get("dosya_adi") or "").strip() or (urun.get("kod") or "").strip()
-        _taban = re.sub(r"[^A-Za-z0-9._-]+", "_", _taban).strip("._-") or "urun"
+        _taban = re.sub(r"[^A-Za-z0-9._-]+", "-", _taban).strip("._-") or "urun"
         tum_sonuclar.append((sorgu, kayitlar, alanlar, hata, kullanilan, _taban,
                              _defter))
 
@@ -1534,7 +1534,46 @@ if st.session_state.get("kredi") and google_var_mi():
 # hata veriyordu. Basit bir sayac bunu tamamen ortadan kaldiriyor.
 _dugme_no = 0
 
-for _satir in st.session_state.get("sonuclar", []):
+# Sayfada yalnizca gorseli BULUNAN urunler listeleniyor. Bulunamayanlar tek
+# bir katlanir kutuda toplu olarak duruyor: 17 urunluk bir listede 3 basarisiz
+# urun sayfayi doldurmasin, ekip bulunan gorsellere odaklanabilsin.
+_tum = st.session_state.get("sonuclar", [])
+_bulunanlar = [x for x in _tum if x[1]]
+_bulunamayanlar = [x for x in _tum if not x[1]]
+
+if _tum:
+    if _bulunamayanlar:
+        st.info(f"**{len(_bulunanlar)} / {len(_tum)} üründe görsel bulundu.** "
+                f"Bulunamayan {len(_bulunamayanlar)} ürün aşağıdaki kutuda.",
+                icon="📋")
+    else:
+        st.success(f"**{len(_tum)} ürünün tamamında görsel bulundu.**", icon="✅")
+
+if _bulunamayanlar:
+    import pandas as pd
+    with st.expander(f"⚠ Bulunamayan {len(_bulunamayanlar)} ürün", expanded=False):
+        _tablo = pd.DataFrame(
+            [{"Ürün": _s[0],
+              "Dosya adı": _s[5],
+              "Neden": (_s[3] or "görsel bulunamadı").split(" — ")[-1][:90]}
+             for _s in _bulunamayanlar])
+        st.dataframe(_tablo, use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "Listeyi indir (.csv)",
+            data=_tablo.to_csv(index=False).encode("utf-8-sig"),
+            file_name="bulunamayan-urunler.csv",
+            mime="text/csv",
+            key="bulunamayan_indir")
+
+        _teshisli = [_s for _s in _bulunamayanlar if len(_s) > 6 and _s[6]]
+        if _teshisli:
+            st.caption("Neden bulunamadığını görmek için:")
+            for _s in _teshisli:
+                with st.expander(f"🔍 {_s[0]}", expanded=False):
+                    st.markdown("\n\n".join(_s[6]))
+
+for _satir in _bulunanlar:
     # Eski oturumlarda defter alani olmayabilir
     sorgu, kayitlar, alanlar, hata, kullanilan, taban = _satir[:6]
     defter = _satir[6] if len(_satir) > 6 else None
@@ -1543,16 +1582,8 @@ for _satir in st.session_state.get("sonuclar", []):
         st.caption(f"Aramada kullanılan: `{kullanilan}`")
 
     if defter:
-        with st.expander("🔍 Teşhis — ne oldu?", expanded=not kayitlar):
+        with st.expander("🔍 Teşhis — ne oldu?", expanded=False):
             st.markdown("\n\n".join(defter))
-
-    if hata:
-        st.error(f"{sorgu} — {hata}")
-        continue
-    if not kayitlar:
-        st.warning("Görsel bulunamadı. Marka adını daha açık yazmayı deneyin "
-                   "ya da en küçük görsel değerini düşürün.")
-        continue
 
     baglanti = sum(1 for k in kayitlar if k.get("dogrulama") == "link")
     tam = sum(1 for k in kayitlar if k.get("dogrulama") == "tam")
@@ -1645,7 +1676,7 @@ for _satir in st.session_state.get("sonuclar", []):
                     st.download_button(
                         "İndir",
                         data=kayit["bayt"],
-                        file_name=f"{taban}_{_urun_sira:02d}{kayit['uzanti']}",
+                        file_name=f"{taban}-{_urun_sira:02d}{kayit['uzanti']}",
                         mime=f"image/{kayit['uzanti'].lstrip('.')}",
                         key=f"indir_{_dugme_no}",
                         use_container_width=True,
@@ -1660,14 +1691,23 @@ if toplam:
         for _s in sonuclar:
             sorgu, kayitlar, taban = _s[0], _s[1], _s[5]
             for i, kayit in enumerate(kayitlar, 1):
-                arsiv.writestr(f"{taban}/{taban}_{i:02d}{kayit['uzanti']}",
+                arsiv.writestr(f"{taban}/{taban}-{i:02d}{kayit['uzanti']}",
                                kayit["bayt"])
+        # Eksik listesi de zip'in icine giriyor ki ekip hangi urunleri elle
+        # arayacagini tek dosyada gorsun.
+        if _bulunamayanlar:
+            import pandas as pd
+            _csv = pd.DataFrame(
+                [{"Ürün": _s[0], "Dosya adı": _s[5],
+                  "Neden": (_s[3] or "görsel bulunamadı")}
+                 for _s in _bulunamayanlar]).to_csv(index=False)
+            arsiv.writestr("BULUNAMAYAN-URUNLER.csv", _csv.encode("utf-8-sig"))
 
     st.divider()
     st.download_button(
         f"Hepsini indir ({toplam} görsel, zip)",
         data=tampon.getvalue(),
-        file_name="urun_gorselleri.zip",
+        file_name="urun-gorselleri.zip",
         mime="application/zip",
         type="primary",
         use_container_width=True,
