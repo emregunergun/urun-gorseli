@@ -165,9 +165,20 @@ def _srcset_en_buyuk(deger):
 
 def _buyut(url):
     """Kucuk onizleme adreslerini buyuk surume cevirir."""
+    # Shopify ve benzeri: ?width=100 / ?w=100
     url = re.sub(r"([?&]width=)\d+", r"\g<1>1600", url)
     url = re.sub(r"([?&]w=)\d{1,3}\b", r"\g<1>1600", url)
+    # Shopify boyut eki: _100x.jpg / _100x100.jpg
     url = re.sub(r"_\d{2,4}x(\d{2,4})?(?=\.(jpg|jpeg|png|webp))", "", url, flags=re.I)
+    # Cloudinary bicimi - adres YOLUNDA olcu yaziyor, soru isareti yok:
+    #   assets.adidas.com/images/w_500,f_auto,q_auto/.../ID1481_01_standard.jpg
+    # adidas resmi gorsellerini 500 piksel olarak sunuyor; 1000px alt sinirina
+    # takilip eleniyorlardi. Ayni adresin w_2000 hali tam boy gorseli veriyor.
+    # Zaten buyuk olanlara (>=1200) dokunmuyoruz.
+    def _olcu(esles):
+        onek, deger = esles.group(1), int(esles.group(2))
+        return f"{onek}2000" if deger < 1200 else esles.group(0)
+    url = re.sub(r"([/,][wh]_)(\d{2,4})\b", _olcu, url)
     return url
 
 
