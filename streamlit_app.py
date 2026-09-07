@@ -87,6 +87,16 @@ ATLANACAK_ALAN = (
 
 UZANTI_TAMAM = (".jpg", ".jpeg", ".png", ".webp")
 
+# Ayni siteden en fazla kac sayfa gezilsin?
+#
+# Eskiden her siteden TEK sayfa aliyorduk. Google 10 sonucun 5'ini ayni
+# magazadan verdiginde (markanin kendi sitesi genelde boyle) sadece ilk
+# sirayi acip digerlerini hic gormuyorduk. American Vintage ornegi: ilk sira
+# BASKA bir urundu (kahverengi ceket), aradigimiz urun 2-3. sirada duruyordu
+# ve hic acilmadi. Ayni adres iki kez gezilmez, sadece ayni magazanin farkli
+# urun sayfalarina bakilir.
+ALAN_BASINA_SAYFA = 5
+
 
 def alan_adi(adres):
     """Adresten alan adini cikarir. www. onekini atar."""
@@ -445,14 +455,36 @@ def sayfa_gorselleri(sayfa_url, oturum, kod="", marka=""):
         for parca in re.findall(r'"([^"\s]+\.(?:jpg|jpeg|png|webp)[^"\s]*)"', metin, re.I):
             ekle(parca.replace("\\/", "/"))
 
+    # <picture><source srcset="..."> - modern galerilerin cogu boyle kuruluyor.
+    # Bunlara bakmadigimiz icin bazi sitelerden TEK bir gorsel bile
+    # cikaramiyor, urunun diger acilarini kaciriyorduk.
+    for kaynak in corba.find_all("source"):
+        for alan in ("srcset", "data-srcset"):
+            if kaynak.get(alan):
+                ekle(_srcset_en_buyuk(kaynak[alan]))
+                break
+
     for resim in corba.find_all("img"):
-        if resim.get("srcset"):
-            ekle(_srcset_en_buyuk(resim["srcset"]))
-        for alan in ("data-zoom-image", "data-large-image", "data-src",
-                     "data-original", "data-image", "src"):
+        for alan in ("srcset", "data-srcset"):
+            if resim.get(alan):
+                ekle(_srcset_en_buyuk(resim[alan]))
+                break
+        # Tembel yukleme (lazy load) kullanan sitelerde gercek adres src'de
+        # degil data-* alanlarinda duruyor; src cogu zaman bos bir yer tutucu.
+        for alan in ("data-zoom-image", "data-large-image", "data-hi-res",
+                     "data-hires", "data-image-src", "data-src", "data-lazy-src",
+                     "data-lazy", "data-original", "data-image", "src"):
             if resim.get(alan):
                 ekle(resim[alan])
                 break
+
+    # Galerilerde buyuk boy gorsel cogu zaman kucuk resmin baglantisinda olur:
+    #   <a href=".../buyuk.jpg"><img src=".../kucuk.jpg"></a>
+    # Sadece gorsel uzantisiyla bitenleri aliyoruz, sayfa baglantilarini degil.
+    for bag in corba.find_all("a"):
+        hedef = (bag.get("href") or "").split("?")[0].lower()
+        if hedef.endswith(UZANTI_TAMAM):
+            ekle(bag["href"])
 
     return adaylar, dogrulama, bilgi
 
@@ -866,16 +898,19 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
             _ad = {"serper": "Google Görseller",
                    "google_cse": "Google (sınırlı)"}.get(arama_motoru(), "arama")
             kullanilan_sorgu = f"{_ad}: {google_sorgu}"
-            aday_sayfalar, gorulen_alan = [], set()
+            aday_sayfalar, alan_sayaci, gorulen_adres = [], {}, set()
             for oge in google_sonuclari:
-                adres = oge.get("sayfa") or ""
+                adres = (oge.get("sayfa") or "").split("#")[0]
                 alan = alan_adi(adres)
-                if alan in gorulen_alan:
+                if not adres or adres in gorulen_adres:
                     continue
                 if alan_yasakli(adres):
                     _not(f"Elendi (kara liste): {alan or adres[:40]}")
                     continue
-                gorulen_alan.add(alan)
+                if alan_sayaci.get(alan, 0) >= ALAN_BASINA_SAYFA:
+                    continue
+                alan_sayaci[alan] = alan_sayaci.get(alan, 0) + 1
+                gorulen_adres.add(adres)
                 aday_sayfalar.append((alan, adres))
                 if len(aday_sayfalar) >= kac_site * 5:
                     break
@@ -886,13 +921,16 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                                 "doğrudan yapıştırmayı deneyin"), ""
 
             # Ihtiyactan cok aday topluyoruz: bir kismi dogrulamayi gecemeyecek
-            aday_sayfalar, gorulen_alan = [], set()
+            aday_sayfalar, alan_sayaci, gorulen_adres = [], {}, set()
             for sonuc in sonuclar:
-                adres = sonuc.get("href") or sonuc.get("link") or ""
+                adres = (sonuc.get("href") or sonuc.get("link") or "").split("#")[0]
                 alan = alan_adi(adres)
-                if alan in gorulen_alan or alan_yasakli(adres):
+                if not adres or adres in gorulen_adres or alan_yasakli(adres):
                     continue
-                gorulen_alan.add(alan)
+                if alan_sayaci.get(alan, 0) >= ALAN_BASINA_SAYFA:
+                    continue
+                alan_sayaci[alan] = alan_sayaci.get(alan, 0) + 1
+                gorulen_adres.add(adres)
                 aday_sayfalar.append((alan, adres))
                 if len(aday_sayfalar) >= kac_site * 5:
                     break
@@ -906,8 +944,9 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         _sonra = [a for a, _ in aday_sayfalar]
         if _once != _sonra:
             _not(f"Markanın kendi sitesi öne alındı: **{_sonra[0]}**")
-        _not(f"Seçilen sorgu: `{kullanilan_sorgu}` → gezilecek sayfalar: "
-             f"{', '.join(_sonra) or '(yok)'}")
+        _not(f"Seçilen sorgu: `{kullanilan_sorgu}` → **{len(aday_sayfalar)} sayfa** gezilecek")
+        for _a, _u in aday_sayfalar:
+            _not(f"     · {_u[:110]}")
 
     if not aday_sayfalar:
         return [], [], "ürün sayfası bulunamadı", kullanilan_sorgu
@@ -954,8 +993,8 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         if kullanilan_site >= kac_site or len(kayitlar) >= kac_gorsel:
             break
         adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka)
-        _not(f"Sayfa: **{alan}** → {len(adaylar)} görsel adayı, "
-             f"doğrulama: `{dogrulama}` "
+        _not(f"Sayfa: **{alan}** `{adres[len(alan) + 8:][:60]}` → "
+             f"{len(adaylar)} görsel adayı, doğrulama: `{dogrulama}` "
              f"({'kabul' if dogrulama in kabul else 'RET — ' + katilik + ' modda kabul edilmiyor'})")
         if not adaylar:
             _not("     · sayfadan hiç görsel çıkarılamadı (site engelliyor olabilir)")
