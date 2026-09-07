@@ -355,125 +355,7 @@ def sayfa_bilgileri(corba, sayfa_url):
     return bilgi
 
 
-# Renk sozlugu. Bir urun sayfasinda cogu zaman TUM renk varyantlarinin
-# gorselleri bulunuyor (AYJE'de tek sayfada 135 gorsel vardi). Dosya adinda
-# renk geciyorsa istemedigimiz renkleri ayiklayabiliyoruz.
-RENK_SOZLUGU = (
-    ("siyah", "black", "noir", "nero"),
-    ("beyaz", "white", "blanc", "bianco", "ecru", "offwhite", "optikbeyaz"),
-    ("lacivert", "navy", "marine", "indigo"),
-    ("mavi", "blue", "bleu", "azur", "turkuaz", "turquoise"),
-    ("yesil", "green", "vert", "haki", "khaki", "mint"),
-    ("kirmizi", "red", "rouge", "bordo", "burgundy", "bordeaux"),
-    ("pembe", "pink", "rose", "fusya", "fuchsia"),
-    ("mor", "purple", "lila", "lilac", "violet", "mauve"),
-    ("sari", "yellow", "jaune", "hardal", "mustard"),
-    ("turuncu", "orange", "somon", "salmon", "coral", "mercan"),
-    ("gri", "grey", "gray", "gris", "antrasit", "anthracite"),
-    ("kahverengi", "brown", "marron", "camel", "taba", "tan", "cikolata"),
-    ("bej", "beige", "krem", "cream", "nude", "tas", "sand", "putty"),
-    ("altin", "gold", "dore", "gumus", "silver"),
-)
-
-# Kisa renk adlari (red, gri, tan...) baska kelimelerin icinde de geciyor
-# ("shaRED", "TANk"), o yuzden onlari sadece tam kelime olarak ariyoruz.
-_RENK_EN_KISA_PARCA = 5
-
-
-def _adres_parcalari(url):
-    """Adresi kelimelere ayirir: .../marisol-balen-siyah_1.jpg -> {marisol,...}"""
-    return set(p for p in re.split(r"[^a-z0-9]+", (url or "").lower()) if p)
-
-
-def renk_anahtarlari(renk):
-    """Istenen rengin dosya adinda gecebilecek karsiliklarini dondurur."""
-    sade = _sadelestir(renk)
-    if not sade:
-        return set()
-    for grup in RENK_SOZLUGU:
-        if any(k in sade for k in grup):
-            return set(grup)
-    return {sade} if len(sade) >= 4 else set()
-
-
-def _renk_gecyor_mu(parcalar, anahtarlar):
-    for a in anahtarlar:
-        if a in parcalar:
-            return True
-        if len(a) >= _RENK_EN_KISA_PARCA and any(a in p for p in parcalar):
-            return True
-    return False
-
-
-def renge_gore_ayikla(adaylar, renk):
-    """Istenen rengin gorsellerini one alir, baska renkleri ayiklar.
-
-    Doner: (siralanmis_adaylar, elenen_sayisi)
-
-    Yalnizca dosya adinda renk yazan sitelerde is goruyor; yazmiyorsa
-    hicbir sey degismez. Istenen renkten hic gorsel bulunamazsa da liste
-    oldugu gibi birakiliyor - eldeki tek sey yanlis renkse bile kullaniciya
-    gostermek, hic gorsel gostermemekten iyi.
-    """
-    istenen = renk_anahtarlari(renk)
-    if not istenen:
-        return adaylar, 0
-    digerleri = set()
-    for grup in RENK_SOZLUGU:
-        digerleri |= set(grup)
-    digerleri -= istenen
-
-    uygun, notr, elenen = [], [], 0
-    for url in adaylar:
-        parcalar = _adres_parcalari(url)
-        if _renk_gecyor_mu(parcalar, istenen):
-            uygun.append(url)
-        elif _renk_gecyor_mu(parcalar, digerleri):
-            elenen += 1
-        else:
-            notr.append(url)
-
-    if not uygun and not notr:
-        return adaylar, 0            # hepsi elenecekti, dokunma
-    return uygun + notr, elenen
-
-
-def urun_sayfasi_mi(corba):
-    """Bu bir URUN sayfasi mi, yoksa koleksiyon/liste sayfasi mi?
-
-    Urun sayfalari yapisal veride Product nesnesi ya da og:type=product
-    tasir; koleksiyon sayfalari tasimaz. Bu ayrimi yapamazsak markanin
-    "Fall/Winter 2026" gibi bir liste sayfasindan 238 alakasiz gorsel
-    cekmemiz isten degil.
-    """
-    try:
-        if _json_ld_urunler(corba):
-            return True
-    except Exception:
-        pass
-    for etiket in corba.find_all("meta"):
-        if etiket.get("property") == "og:type" and \
-           "product" in (etiket.get("content") or "").lower():
-            return True
-    return False
-
-
-def ad_sayfada_gecyor_mu(metin, ad):
-    """Model adinin ayirt edici kelimesi sayfada geciyor mu?
-
-    "Marisol BALEN TOP V BOTTOM" icinde ayirt edici olan marisol/balen;
-    top, bottom, bikini gibi kelimeler her mayoda geciyor, onlari saymiyoruz.
-    """
-    kelimeler = [_sadelestir(p) for p in re.split(r"[\s/&,._-]+", ad or "") if p]
-    kelimeler = [p for p in kelimeler
-                 if len(p) >= 4 and p not in GENEL_KELIMELER]
-    if not kelimeler:
-        return False
-    sade = _sadelestir(metin)
-    return any(k in sade for k in kelimeler)
-
-
-def sayfa_gorselleri(sayfa_url, oturum, kod="", marka="", ad=""):
+def sayfa_gorselleri(sayfa_url, oturum, kod="", marka=""):
     """Sayfadaki gorselleri, kod dogrulamasini ve urun bilgilerini dondurur."""
     try:
         cevap = oturum.get(sayfa_url, timeout=15)
@@ -483,13 +365,7 @@ def sayfa_gorselleri(sayfa_url, oturum, kod="", marka="", ad=""):
     if "text/html" not in cevap.headers.get("Content-Type", ""):
         return [], "yok", {}
 
-    # Sayfa ADRESINI de dogrulamaya katiyoruz. Bircok magaza urun kodunu
-    # adrese koyuyor (.../MFAZ02CE26-LIPAVI.html) ama sayfa metnine yazmiyor
-    # ya da JavaScript ile sonradan basiyor - o zaman biz goremiyoruz ve
-    # markanin KENDI urun sayfasi bile "kod yok" diye eleniyordu.
-    # Yonlendirme olmussa gercek adresi kullaniyoruz.
-    _gercek_adres = getattr(cevap, "url", "") or sayfa_url
-    dogrulama = sayfayi_dogrula(_gercek_adres + " " + cevap.text, kod, marka)
+    dogrulama = sayfayi_dogrula(cevap.text, kod, marka)
     corba = BeautifulSoup(cevap.text, "html.parser")
     # Bilgi cikarimi sayfanin yapisina bagli; beklenmedik bir bicim gelirse
     # gorselleri kaybetmemek icin sadece bilgiyi bos gecip devam ediyoruz.
@@ -497,17 +373,6 @@ def sayfa_gorselleri(sayfa_url, oturum, kod="", marka="", ad=""):
         bilgi = sayfa_bilgileri(corba, sayfa_url)
     except Exception:
         bilgi = {}
-
-    # Bazi markalar tedarikci kodunu kendi sitelerine hic yazmiyor (AYJE
-    # gibi). O zaman kod dogrulamasi "marka"da takiliyor ve dogru urun
-    # sayfasi eleniyor. Uc sart birden saglanirsa bunu "ad" kademesi
-    # sayiyoruz: marka tutuyor + model adinin ayirt edici kelimesi sayfada
-    # geciyor + sayfa gercekten bir URUN sayfasi (koleksiyon listesi degil).
-    if dogrulama == "marka" and ad and \
-            ad_sayfada_gecyor_mu(_gercek_adres + " " + cevap.text, ad) and \
-            urun_sayfasi_mi(corba):
-        dogrulama = "ad"
-
     adaylar, gorulen = [], set()
 
     def ekle(ham):
@@ -708,7 +573,7 @@ def marka_izi_var(oge, marka):
     return any(p in havuz for p in parcalar)
 
 
-def sonuc_puani(sonuclar, kod, marka, ad=""):
+def sonuc_puani(sonuclar, kod, marka):
     """Arama sonuclari bu urune ne kadar uyuyor?
 
     Google bos donmese bile alakasiz seyler dondurebiliyor, o yuzden
@@ -722,43 +587,11 @@ def sonuc_puani(sonuclar, kod, marka, ad=""):
     if not kod and not marka:
         return YETERLI_PUAN          # olcecek bir sey yok, geleni kabul et
     puan = 0
-    # Kod puani: bu sonuclar gercekten BU urune mi ait?
-    puan = kod_eslesme_puani(sonuclar, kod)
-
-    # Marka puani TAVANLI. Tavan olmadan markanin 10 koleksiyon sayfasi
-    # (10 puan) tek gercek kod eslesmesini (6 puan) yeniyor ve yanlis deneme
-    # kazanan secilliyordu.
-    if marka:
-        puan += min(sum(1 for oge in sonuclar[:10] if marka_izi_var(oge, marka)),
-                    MARKA_PUAN_TAVANI)
-
-    # Model adi / resmi magaza sinyali. Kod tutmadiginda hangi denemenin
-    # dogru yeri buldugunu ayirt eden sey bu.
-    puan += ad_eslesme_puani(sonuclar, ad, marka)
-    return puan
-
-
-def kod_eslesme_puani(sonuclar, kod):
-    """Yalnizca URUN KODU eslesmelerinden gelen puan.
-
-    sonuc_puani marka eslesmelerini de sayiyor - hangi denemenin daha iyi
-    oldugunu secmek icin bu dogru. Ama "yeterince eminim, aramayi birakayim"
-    kararini marka eslesmesiyle vermek yanlis: markanin koleksiyon sayfasi
-    ("Fall/Winter 2026 | American Vintage") 10 sonucun 10'unda cikip puani
-    doldurabiliyor, biz de dogru urunu buldugumuzu sanip duruyoruz. Halbuki
-    o sayfalarda urun yok. Aramayi ancak KOD tuttugunda birakiyoruz.
-    """
-    if not kod or not sonuclar:
-        return 0
-    sade_kod = _sadelestir(kod)
-    puan = 0
     for oge in sonuclar[:10]:
-        havuz = _sadelestir(" ".join([
-            oge.get("gorsel", ""), oge.get("sayfa", ""), oge.get("baslik", "")]))
-        if sade_kod and sade_kod in havuz:
-            puan += YETERLI_PUAN
-        elif google_sonucunu_dogrula(oge, kod) == "google":
+        if kod and google_sonucunu_dogrula(oge, kod) == "google":
             puan += 3
+        elif marka and marka_izi_var(oge, marka):
+            puan += 1
     return puan
 
 
@@ -766,62 +599,6 @@ def kod_eslesme_puani(sonuclar, kod):
 # harciyoruz; ulasamazsak sorguyu zenginlestirip bir daha deniyoruz.
 YETERLI_PUAN = 6
 EN_FAZLA_DENEME = 3
-# Marka eslesmelerinin toplayabilecegi en yuksek puan. Yeterli puanin
-# altinda kalmali ki marka tek basina "buldum" dedirtemesin.
-MARKA_PUAN_TAVANI = 3
-# Model adi / resmi magaza sinyalinin toplayabilecegi en yuksek puan.
-AD_PUAN_TAVANI = 4
-
-# Model adindaki ayirt edici OLMAYAN kelimeler. "Marisol U SWIMSUIT" icinde
-# ayirt edici olan "marisol"; "swimsuit" her mayoda geciyor, eslesirse yanlis
-# yonlendirir (alakasiz bir "Black Swimsuit" sonucu puan kazanirdi).
-GENEL_KELIMELER = {
-    # giyim turleri
-    "mayo", "bikini", "swimsuit", "swimwear", "tshirt", "shirt", "gomlek",
-    "elbise", "dress", "pantolon", "pants", "jean", "denim", "ceket",
-    "jacket", "kazak", "sweater", "jumper", "sweatshirt", "hoodie", "canta",
-    "bag", "backpack", "ayakkabi", "shoes", "sneaker", "terlik", "sandalet",
-    "bornoz", "sort", "shorts", "etek", "skirt", "bluz", "tunik", "takim",
-    "takimi", "yaka", "kollu", "clog", "coat", "mont", "parka", "trench",
-    # cinsiyet / genel
-    "kadin", "erkek", "unisex", "women", "womens", "woman", "mens", "kids",
-    "cocuk", "bebek", "child", "girls", "boys",
-    # renkler
-    "siyah", "beyaz", "mavi", "yesil", "kirmizi", "sari", "lacivert", "gri",
-    "pembe", "mor", "kahverengi", "bej", "black", "white", "blue", "green",
-    "red", "yellow", "navy", "grey", "gray", "pink", "brown", "beige",
-}
-
-
-def ad_eslesme_puani(sonuclar, ad, marka):
-    """Model adi ve "markanin kendi magazasi" sinyalinden gelen puan.
-
-    Kisa ve genel kodlarda ("A-129-7") kod eslesmesi ise yaramiyor: Google
-    icinde 129 gecen Kuran ayetini ya da ucak kuyruk numarasini getirebiliyor.
-    Boyle durumlarda iki saglam ipucu kaliyor:
-
-      1. Model adinin ayirt edici kelimesi baslikta geciyor mu?
-         ("Marisol U Yaka Mayo" -> marisol tutuyor)
-      2. Sonucun alan adi markanin kendi magazasi mi? (ayjeshop.com)
-
-    Bu puan yalnizca HANGI DENEMENIN daha iyi oldugunu secerken kullanilir;
-    "aramayi birak" karari hala sadece koda bakar.
-    """
-    if not sonuclar:
-        return 0
-    kelimeler = [_sadelestir(p) for p in re.split(r"[\s/&,._-]+", ad or "") if p]
-    kelimeler = [p for p in kelimeler
-                 if len(p) >= 4 and p not in GENEL_KELIMELER]
-    sade_marka = _sadelestir(marka)
-    puan = 0
-    for oge in sonuclar[:10]:
-        baslik = _sadelestir(oge.get("baslik", ""))
-        alan = _sadelestir(alan_adi(oge.get("sayfa", "")))
-        if kelimeler and any(k in baslik for k in kelimeler):
-            puan += 2
-        if sade_marka and len(sade_marka) >= 3 and sade_marka in alan:
-            puan += 2
-    return min(puan, AD_PUAN_TAVANI)
 
 
 def google_var_mi():
@@ -948,20 +725,14 @@ def ara_kademeli(marka, ad, kod, renk=""):
 
 
 def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta",
-                    renk_gerekli=False, teshis=None):
+                    renk_gerekli=False):
     """Tek bir urun icin gorselleri toplar.
 
     katilik:
       "siki"  - sadece kodun tamaminin gectigi sayfalar
       "orta"  - kodun tamami ya da govdesi gecen sayfalar (varsayilan)
       "gevsek"- dogrulama yapma, arama ne verdiyse al
-
-    teshis: liste verilirse her adim buraya yazilir. None ise (varsayilan)
-    hicbir sey yapilmaz - arama davranisi teshisten etkilenmez.
     """
-    def _not(metin):
-        if teshis is not None:
-            teshis.append(metin)
     kod = (urun.get("kod") or "").strip()
     marka = (urun.get("marka") or "").strip()
     ad = (urun.get("ad") or "").strip()
@@ -1025,31 +796,11 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 _gorulen_deneme.add(_deneme)
                 _sayac += 1
                 _bulunan = gorsel_arama_yap(_deneme)
-                _puan = sonuc_puani(_bulunan, kod, marka, ad)
-                _kod_puan = kod_eslesme_puani(_bulunan, kod)
-                _not(f"Sorgu {_sayac}: `{_deneme}` → **{len(_bulunan)} sonuç**, "
-                     f"puan {_puan}"
-                     + (f" (bunun {_kod_puan}'i koddan)" if kod else "")
-                     + f" — durmak için koddan {YETERLI_PUAN} gerek")
-                for _s in _bulunan[:5]:
-                    _not(f"     · {alan_adi(_s.get('sayfa','')) or '?'} — "
-                         f"{(_s.get('baslik') or '')[:70]}")
+                _puan = sonuc_puani(_bulunan, kod, marka)
                 if _puan > _en_iyi_puan:
                     _en_iyi_puan = _puan
                     google_sonuclari, google_sorgu = _bulunan, _deneme
-                # Durma karari SADECE kod eslesmesine bakar. Marka eslesmesi
-                # "bu markanin bir sayfasi" demektir, "bu urun" demek degil.
-                if kod:
-                    _yeter = _kod_puan >= YETERLI_PUAN
-                elif marka:
-                    # Kod yoksa marka tek olcutumuz; burada tavan uygulanmaz,
-                    # yoksa kodsuz urunler bosuna ikinci kez aranir.
-                    _yeter = sum(1 for _o in _bulunan
-                                 if marka_izi_var(_o, marka)) >= YETERLI_PUAN
-                else:
-                    _yeter = bool(_bulunan)
-                if _yeter:
-                    _not("   → kod doğrulandı, başka sorgu denenmedi")
+                if _en_iyi_puan >= YETERLI_PUAN:
                     break               # emin olduk, fazladan kredi harcama
 
         if google_sonuclari:
@@ -1060,17 +811,12 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
             for oge in google_sonuclari:
                 adres = oge.get("sayfa") or ""
                 alan = alan_adi(adres)
-                if alan in gorulen_alan:
-                    continue
-                if alan_yasakli(adres):
-                    _not(f"Elendi (kara liste / geçersiz adres): {alan or adres[:40]}")
+                if alan in gorulen_alan or alan_yasakli(adres):
                     continue
                 gorulen_alan.add(alan)
                 aday_sayfalar.append((alan, adres))
                 if len(aday_sayfalar) >= kac_site * 5:
                     break
-            _not(f"Seçilen sorgu: `{google_sorgu}` → gezilecek "
-                 f"**{len(aday_sayfalar)} sayfa**")
         else:
             sonuclar, kullanilan_sorgu = ara_kademeli(marka, ad, kod, renk)
             if not sonuclar:
@@ -1095,11 +841,9 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     # "yok" hicbir modda kabul edilmez: o sayfada ne urun kodu ne marka adi
     # geciyor demektir, urunle alakasi yoktur. Arama motoru uzun kodlarda
     # bambaska sayfalar getirebiliyor; buradan geri donuyoruz.
-    # "ad": kod sayfada yok ama marka + model adi tutuyor ve sayfa bir urun
-    # sayfasi. Bu "marka"dan belirgin sekilde guclu, o yuzden orta kabul eder.
     KADEMELER = {"siki": {"tam"},
-                 "orta": {"tam", "kismi", "ad"},
-                 "gevsek": {"tam", "kismi", "ad", "zayif", "marka"}}
+                 "orta": {"tam", "kismi"},
+                 "gevsek": {"tam", "kismi", "zayif", "marka"}}
     kabul = KADEMELER[katilik]
     # Linki kullanici verdiyse dogrulamaya gerek yok - sayfayi zaten o secti
     if link_verildi:
@@ -1135,40 +879,25 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         # Cop sonuclar ilk siralari kaplasa bile gercek urun sayfasina ulasiriz.
         if kullanilan_site >= kac_site or len(kayitlar) >= kac_gorsel:
             break
-        adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka, ad)
-        # Urun sayfasinda cogu zaman butun renkler bir arada duruyor.
-        # Dosya adinda renk yazan sitelerde istemedigimiz renkleri ayikliyoruz.
-        adaylar, _renk_elenen = renge_gore_ayikla(adaylar, renk)
-        if _renk_elenen:
-            _not(f"     · {_renk_elenen} görsel başka renk olduğu için ayıklandı "
-                 f"(istenen: {renk})")
-        _not(f"Sayfa: **{alan}** → {len(adaylar)} görsel adayı, "
-             f"doğrulama: `{dogrulama}` "
-             f"({'kabul' if dogrulama in kabul else 'RET — ' + katilik + ' modda kabul edilmiyor'})")
-        if not adaylar:
-            _not("     · sayfadan hiç görsel çıkarılamadı (site engelliyor olabilir)")
+        adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka)
         if dogrulama not in kabul:
             elenen.append(alan)
             # Otomatik gevsetme yalnizca kodun izinin bulundugu sayfalara
             # iner. Sadece marka adi gecen sayfa (koleksiyon listesi olabilir)
             # ya da hicbir izi olmayan sayfa yedege alinmaz - kullanici
             # isterse "Gevsek" secerek onlari acikca isteyebilir.
-            if adaylar and dogrulama in ("kismi", "ad", "zayif") \
-                    and len(yedekler) < kac_site:
+            if adaylar and dogrulama in ("kismi", "zayif") and len(yedekler) < kac_site:
                 yedekler.append((alan, adres, adaylar, dogrulama, bilgi))
             continue
         kullanilan_site += 1
-        _eklendi = sayfadan_topla(alan, adres, adaylar, dogrulama, bilgi)
-        _not(f"     · {_eklendi} görsel alındı "
-             f"({len(adaylar) - _eklendi} tanesi {en_kucuk}px altı, "
-             f"kopya ya da indirilemedi)")
+        sayfadan_topla(alan, adres, adaylar, dogrulama, bilgi)
         time.sleep(0.4)
 
     # Secilen katilikta hic sonuc cikmadiysa elenenlere geri donuyoruz.
     # Kullaniciyi "ayari gevsetin" diye geri gondermek yerine kendimiz
     # gevsetip sonucu acikca etiketliyoruz.
     if not kayitlar and yedekler:
-        sira = {"tam": 0, "kismi": 1, "ad": 2, "zayif": 3, "marka": 4}
+        sira = {"tam": 0, "kismi": 1, "zayif": 2, "marka": 3}
         for alan, adres, adaylar, dogrulama, bilgi in sorted(
                 yedekler, key=lambda y: sira.get(y[3], 9)):
             if len(kayitlar) >= kac_gorsel:
@@ -1199,9 +928,6 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                           if not alan_yasakli(o.get("sayfa", ""))]
 
         esik = {"siki": 2, "orta": 4, "gevsek": 10 ** 6}[katilik]
-        _not(f"Sayfalardan görsel çıkmadı — Google'ın görsellerine düşülüyor "
-             f"({len(temiz_sonuclar)} aday, {katilik} modda ilk {esik} sıra "
-             f"+ kodu doğrulananlar kabul)")
         onaylanan = []
         for sira_no, oge in enumerate(temiz_sonuclar):
             etiket = google_sonucunu_dogrula(oge, kod)
@@ -1212,13 +938,11 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 # O zaman en azindan marka adi gecsin.
                 onaylanan.append((oge, etiket))
 
-        _basarisiz = 0
         for oge, etiket in onaylanan:
             if len(kayitlar) >= kac_gorsel:
                 break
             sonuc = gorsel_al(oge.get("gorsel", ""), oturum, en_az=en_kucuk)
             if not sonuc:
-                _basarisiz += 1
                 continue
             bayt, gen, yuk, uzanti = sonuc
             imza = hashlib.sha256(bayt).hexdigest()[:20]
@@ -1235,11 +959,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                           "kod": "", "aciklama": "", "ozellikler": []},
             })
 
-        _not(f"     · {len(onaylanan)} sonuç kabul edildi, {_basarisiz} tanesi "
-             f"indirilemedi ya da {en_kucuk}px altında kaldı")
-
     kullanilan = sorted({k["alan"] for k in kayitlar})
-    _not(f"**SONUÇ: {len(kayitlar)} görsel**")
     if not kayitlar:
         if google_sonuclari:
             neden = ("arama sonuç verdi ama hiçbiri bu ürüne uymadı ya da "
@@ -1375,13 +1095,6 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     katilik = {"Sıkı": "siki", "Orta": "orta", "Gevşek": "gevsek"}[katilik_adi]
-
-    st.divider()
-    teshis_acik = st.checkbox(
-        "Teşhis modu", value=False,
-        help="Her ürün için hangi sorguların denendiğini, hangi sayfaların "
-             "gezildiğini ve görsellerin neden elendiğini gösterir. "
-             "Arama davranışını DEĞİŞTİRMEZ, sadece olan biteni yazar.")
 
     st.divider()
     st.caption("Sonuç gelmiyorsa: ürün sayfasının linkini doğrudan yapıştırın, "
@@ -1606,21 +1319,19 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
                                          urun.get("renk")) if x)
                  or urun.get("ad") or "ürün")
         ilerleme.progress(sira / len(satirlar), text=f"Aranıyor: {sorgu}")
-        _defter = [] if teshis_acik else None
         try:
             _ik = (_sadelestir(urun.get("marka", "")), _sadelestir(urun.get("kod", "")))
             kayitlar, alanlar, hata, kullanilan = urun_gorselleri(
                 urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik,
-                renk_gerekli=_kod_sayaci.get(_ik, 1) > 1, teshis=_defter)
+                renk_gerekli=_kod_sayaci.get(_ik, 1) > 1)
         except Exception as sorun:
             # Bir urunde beklenmedik hata cikarsa listenin geri kalani dursun
             kayitlar, alanlar, kullanilan = [], [], ""
             hata = f"beklenmedik hata: {type(sorun).__name__} — {sorun}"
         # Indirilen dosyalarin adi: eski malzeme no varsa o, yoksa urun kodu
         _taban = (urun.get("dosya_adi") or "").strip() or (urun.get("kod") or "").strip()
-        _taban = re.sub(r"[^A-Za-z0-9._-]+", "-", _taban).strip("._-") or "urun"
-        tum_sonuclar.append((sorgu, kayitlar, alanlar, hata, kullanilan, _taban,
-                             _defter))
+        _taban = re.sub(r"[^A-Za-z0-9._-]+", "_", _taban).strip("._-") or "urun"
+        tum_sonuclar.append((sorgu, kayitlar, alanlar, hata, kullanilan, _taban))
 
     ilerleme.progress(1.0, text="Bitti")
     ilerleme.empty()
@@ -1649,54 +1360,18 @@ if st.session_state.get("kredi") and google_var_mi():
 # hata veriyordu. Basit bir sayac bunu tamamen ortadan kaldiriyor.
 _dugme_no = 0
 
-# Bulunanlari ve bulunamayanlari ayiriyoruz: sayfa yalnizca gorseli bulunan
-# urunleri listeliyor, bulunamayanlar tek bir katlanir kutuda toplaniyor.
-# Boylece 17 urunluk bir listede 3 basarisiz urun sayfayi doldurmuyor.
-_tum = st.session_state.get("sonuclar", [])
-_bulunanlar = [x for x in _tum if x[1]]
-_bulunamayanlar = [x for x in _tum if not x[1]]
-
-if _tum:
-    if _bulunamayanlar:
-        st.caption(f"{len(_tum)} üründen **{len(_bulunanlar)} tanesinde görsel "
-                   f"bulundu**, {len(_bulunamayanlar)} tanesinde bulunamadı.")
-    else:
-        st.caption(f"{len(_tum)} ürünün tamamında görsel bulundu.")
-
-# --- Bulunamayan urunler: tek kutuda, kapali
-if _bulunamayanlar:
-    with st.expander(f"⚠ Bulunamayan {len(_bulunamayanlar)} ürün", expanded=False):
-        _liste = []
-        for _s in _bulunamayanlar:
-            _sorgu, _hata, _kul = _s[0], _s[3], _s[4]
-            _defter = _s[6] if len(_s) > 6 else None
-            st.markdown(f"**{_sorgu}**")
-            st.caption(_hata or "görsel bulunamadı")
-            if _kul and _kul.strip() != _sorgu.strip():
-                st.caption(f"Aramada kullanılan: `{_kul}`")
-            if _defter:
-                with st.expander("🔍 Teşhis", expanded=False):
-                    st.markdown("\n\n".join(_defter))
-            st.divider()
-            _liste.append(f"{_sorgu}\t{_hata or 'görsel bulunamadı'}")
-        st.download_button(
-            "Bulunamayan ürünleri indir (.txt)",
-            data=("\n".join(_liste)).encode("utf-8"),
-            file_name="bulunamayan-urunler.txt",
-            mime="text/plain",
-            key="bulunamayan_indir")
-
-for _satir in _bulunanlar:
-    # Eski oturumlarda defter alani olmayabilir
-    sorgu, kayitlar, alanlar, hata, kullanilan, taban = _satir[:6]
-    defter = _satir[6] if len(_satir) > 6 else None
+for sorgu, kayitlar, alanlar, hata, kullanilan, taban in st.session_state.get("sonuclar", []):
     st.subheader(sorgu)
     if kullanilan and kullanilan.strip() != sorgu.strip():
         st.caption(f"Aramada kullanılan: `{kullanilan}`")
 
-    if defter:
-        with st.expander("🔍 Teşhis — ne oldu?", expanded=False):
-            st.markdown("\n\n".join(defter))
+    if hata:
+        st.error(f"{sorgu} — {hata}")
+        continue
+    if not kayitlar:
+        st.warning("Görsel bulunamadı. Marka adını daha açık yazmayı deneyin "
+                   "ya da en küçük görsel değerini düşürün.")
+        continue
 
     baglanti = sum(1 for k in kayitlar if k.get("dogrulama") == "link")
     tam = sum(1 for k in kayitlar if k.get("dogrulama") == "tam")
@@ -1778,7 +1453,6 @@ for _satir in _bulunanlar:
                              use_container_width=True)
                     rozet = {"tam": "✓ kod doğrulandı",
                              "kismi": "~ kısmi eşleşme",
-                             "ad": "✓ marka + model adı eşleşti",
                              "zayif": "⚠ aynı model, renk farklı olabilir",
                              "marka": "⚠ sadece marka eşleşti",
                              "google": "✓ Google + kod eşleşti",
@@ -1790,7 +1464,7 @@ for _satir in _bulunanlar:
                     st.download_button(
                         "İndir",
                         data=kayit["bayt"],
-                        file_name=f"{taban}-{_urun_sira:02d}{kayit['uzanti']}",
+                        file_name=f"{taban}_{_urun_sira:02d}{kayit['uzanti']}",
                         mime=f"image/{kayit['uzanti'].lstrip('.')}",
                         key=f"indir_{_dugme_no}",
                         use_container_width=True,
@@ -1798,28 +1472,20 @@ for _satir in _bulunanlar:
 
 # --- Hepsini birden indir ---
 sonuclar = st.session_state.get("sonuclar", [])
-toplam = sum(len(_s[1]) for _s in sonuclar)
+toplam = sum(len(k) for _, k, _, _, _, _ in sonuclar)
 if toplam:
     tampon = io.BytesIO()
     with zipfile.ZipFile(tampon, "w", zipfile.ZIP_DEFLATED) as arsiv:
-        for _s in sonuclar:
-            sorgu, kayitlar, taban = _s[0], _s[1], _s[5]
+        for sorgu, kayitlar, _, _, _, taban in sonuclar:
             for i, kayit in enumerate(kayitlar, 1):
-                arsiv.writestr(f"{taban}/{taban}-{i:02d}{kayit['uzanti']}",
+                arsiv.writestr(f"{taban}/{taban}_{i:02d}{kayit['uzanti']}",
                                kayit["bayt"])
-        # Bulunamayanlarin listesi de zip'in icine konuyor ki ekip
-        # hangi urunleri elle arayacagini tek dosyada gorsun.
-        if _bulunamayanlar:
-            _metin = "Görseli bulunamayan ürünler\n\n" + "\n".join(
-                f"{_s[0]}\t{_s[3] or 'görsel bulunamadı'}"
-                for _s in _bulunamayanlar)
-            arsiv.writestr("BULUNAMAYAN-URUNLER.txt", _metin.encode("utf-8"))
 
     st.divider()
     st.download_button(
         f"Hepsini indir ({toplam} görsel, zip)",
         data=tampon.getvalue(),
-        file_name="urun-gorselleri.zip",
+        file_name="urun_gorselleri.zip",
         mime="application/zip",
         type="primary",
         use_container_width=True,
