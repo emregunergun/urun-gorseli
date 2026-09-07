@@ -633,17 +633,32 @@ def serper_gorsel_ara(sorgu, adet=10):
     anahtar = _gizli("serper_api_key")
     if not anahtar:
         return []
-    try:
-        cevap = requests.post(
-            "https://google.serper.dev/images",
-            headers={"X-API-KEY": anahtar, "Content-Type": "application/json"},
-            json={"q": sorgu, "num": 10},          # 10 = 1 kredi
-            timeout=25,
-        )
-        if cevap.status_code != 200:
-            return []
-        veri = cevap.json()
-    except Exception:
+
+    def _iste(govde):
+        """Tek bir istek atar; basarisiz olursa None doner."""
+        try:
+            cevap = requests.post(
+                "https://google.serper.dev/images",
+                headers={"X-API-KEY": anahtar, "Content-Type": "application/json"},
+                json=govde, timeout=25,
+            )
+            if cevap.status_code != 200:
+                return None
+            return cevap.json()
+        except Exception:
+            return None
+
+    # Aramayi TURKIYE yerelinde yapiyoruz. Ekip Turkiye'den bakiyor ve
+    # urunleri satan siteler cogunlukla Turk perakendecileri. Varsayilan ABD
+    # yereliyle arayinca bunlar sonuclara hic girmiyor: "AYJE A-129-S56"
+    # Turkiye'de ilk sirada Vakkorama'yi veriyor, ABD'de ucak ve otomobil
+    # yedek parcasi sonuclari geliyor.
+    veri = _iste({"q": sorgu, "num": 10, "gl": "tr", "hl": "tr"})   # 10 = 1 kredi
+    if veri is None:
+        # Yerel parametreler herhangi bir sebeple reddedilirse sade istekle
+        # tekrar deniyoruz; boylece uygulama hicbir kosulda bos donmez.
+        veri = _iste({"q": sorgu, "num": 10})
+    if veri is None:
         return []
 
     bulunanlar = []
