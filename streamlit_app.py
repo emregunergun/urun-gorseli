@@ -406,7 +406,13 @@ def sayfa_gorselleri(sayfa_url, oturum, kod="", marka=""):
     if "text/html" not in cevap.headers.get("Content-Type", ""):
         return [], "yok", {}
 
-    dogrulama = sayfayi_dogrula(cevap.text, kod, marka)
+    # Sayfa ADRESINI de dogrulamaya katiyoruz. Bircok magaza urun kodunu
+    # adrese koyuyor (.../MFAZ02CE26-LIPAVI.html) ama sayfa metnine yazmiyor
+    # ya da JavaScript ile sonradan basiyor - o zaman biz goremiyoruz ve
+    # markanin KENDI urun sayfasi bile "kodu yok" diye eleniyordu.
+    # Yonlendirme olmussa gercek adresi kullaniyoruz.
+    _gercek_adres = getattr(cevap, "url", "") or sayfa_url
+    dogrulama = sayfayi_dogrula(_gercek_adres + " " + cevap.text, kod, marka)
     corba = BeautifulSoup(cevap.text, "html.parser")
     # Bilgi cikarimi sayfanin yapisina bagli; beklenmedik bir bicim gelirse
     # gorselleri kaybetmemek icin sadece bilgiyi bos gecip devam ediyoruz.
