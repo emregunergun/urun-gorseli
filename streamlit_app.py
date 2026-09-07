@@ -94,6 +94,36 @@ def alan_adi(adres):
     return re.sub(r"^www\.", "", bulunan[0]).lower() if bulunan else ""
 
 
+def markanin_kendi_sitesi_mi(alan, marka):
+    """Bu alan adi markanin kendi sitesi mi?
+
+    Marka adindaki bosluk ve isaretler atilip alan adinda araniyor:
+        adidas            -> adidas.com            ✓
+        PALM ANGELS       -> palmangels.com        ✓
+        AMERICAN VINTAGE  -> americanvintage-store.com  ✓
+        AYJE              -> ayjeshop.com          ✓
+    Uc harften kisa markalarda tesaduf riski yuksek, karisilmiyor.
+    """
+    sade_marka = _sadelestir(marka)
+    if len(sade_marka) < 4:
+        return False
+    return sade_marka in _sadelestir(alan)
+
+
+def markayi_one_al(sayfalar, marka):
+    """Markanin kendi sitesini listenin basina alir, sirayi bozmadan.
+
+    Filtreleme DEGIL siralama: diger siteler listede kalir, sadece arkaya
+    gecer. Markanin sitesinde urun yoksa ya da sayfa kazinamazsa digerlerine
+    normal sekilde devam edilir.
+    """
+    if not marka:
+        return sayfalar
+    kendi = [x for x in sayfalar if markanin_kendi_sitesi_mi(x[0], marka)]
+    digerleri = [x for x in sayfalar if not markanin_kendi_sitesi_mi(x[0], marka)]
+    return kendi + digerleri
+
+
 def alan_yasakli(adres):
     """Bu adres kara listedeki bir siteye mi ait?"""
     alan = alan_adi(adres)
@@ -725,14 +755,20 @@ def ara_kademeli(marka, ad, kod, renk=""):
 
 
 def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta",
-                    renk_gerekli=False):
+                    renk_gerekli=False, teshis=None):
     """Tek bir urun icin gorselleri toplar.
 
     katilik:
       "siki"  - sadece kodun tamaminin gectigi sayfalar
       "orta"  - kodun tamami ya da govdesi gecen sayfalar (varsayilan)
       "gevsek"- dogrulama yapma, arama ne verdiyse al
+
+    teshis: liste verilirse her adim buraya yazilir. None ise (varsayilan)
+    hicbir sey yapilmaz - arama davranisi teshisten hic etkilenmez.
     """
+    def _not(metin):
+        if teshis is not None:
+            teshis.append(metin)
     kod = (urun.get("kod") or "").strip()
     marka = (urun.get("marka") or "").strip()
     ad = (urun.get("ad") or "").strip()
@@ -797,10 +833,16 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 _sayac += 1
                 _bulunan = gorsel_arama_yap(_deneme)
                 _puan = sonuc_puani(_bulunan, kod, marka)
+                _not(f"Sorgu {_sayac}: `{_deneme}` → **{len(_bulunan)} sonuç**, "
+                     f"puan {_puan} (yeterli: {YETERLI_PUAN})")
+                for _s in _bulunan[:5]:
+                    _not(f"     · {alan_adi(_s.get('sayfa','')) or '?'} — "
+                         f"{(_s.get('baslik') or '')[:70]}")
                 if _puan > _en_iyi_puan:
                     _en_iyi_puan = _puan
                     google_sonuclari, google_sorgu = _bulunan, _deneme
                 if _en_iyi_puan >= YETERLI_PUAN:
+                    _not("   → puan yeterli, başka sorgu denenmedi")
                     break               # emin olduk, fazladan kredi harcama
 
         if google_sonuclari:
@@ -811,7 +853,10 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
             for oge in google_sonuclari:
                 adres = oge.get("sayfa") or ""
                 alan = alan_adi(adres)
-                if alan in gorulen_alan or alan_yasakli(adres):
+                if alan in gorulen_alan:
+                    continue
+                if alan_yasakli(adres):
+                    _not(f"Elendi (kara liste): {alan or adres[:40]}")
                     continue
                 gorulen_alan.add(alan)
                 aday_sayfalar.append((alan, adres))
@@ -834,6 +879,18 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 aday_sayfalar.append((alan, adres))
                 if len(aday_sayfalar) >= kac_site * 5:
                     break
+
+    # Once markanin KENDI sitesine bakiyoruz: resmi katalog gorseli hem en
+    # dogru urun hem de en temiz cekim. Bulamazsa liste digerleriyle devam
+    # eder - hicbir site elenmedi, sadece sira degisti.
+    if not link_verildi:
+        _once = [a for a, _ in aday_sayfalar]
+        aday_sayfalar = markayi_one_al(aday_sayfalar, marka)
+        _sonra = [a for a, _ in aday_sayfalar]
+        if _once != _sonra:
+            _not(f"Markanın kendi sitesi öne alındı: **{_sonra[0]}**")
+        _not(f"Seçilen sorgu: `{kullanilan_sorgu}` → gezilecek sayfalar: "
+             f"{', '.join(_sonra) or '(yok)'}")
 
     if not aday_sayfalar:
         return [], [], "ürün sayfası bulunamadı", kullanilan_sorgu
@@ -880,6 +937,11 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
         if kullanilan_site >= kac_site or len(kayitlar) >= kac_gorsel:
             break
         adaylar, dogrulama, bilgi = sayfa_gorselleri(adres, oturum, kod, marka)
+        _not(f"Sayfa: **{alan}** → {len(adaylar)} görsel adayı, "
+             f"doğrulama: `{dogrulama}` "
+             f"({'kabul' if dogrulama in kabul else 'RET — ' + katilik + ' modda kabul edilmiyor'})")
+        if not adaylar:
+            _not("     · sayfadan hiç görsel çıkarılamadı (site engelliyor olabilir)")
         if dogrulama not in kabul:
             elenen.append(alan)
             # Otomatik gevsetme yalnizca kodun izinin bulundugu sayfalara
@@ -890,7 +952,10 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                 yedekler.append((alan, adres, adaylar, dogrulama, bilgi))
             continue
         kullanilan_site += 1
-        sayfadan_topla(alan, adres, adaylar, dogrulama, bilgi)
+        _eklendi = sayfadan_topla(alan, adres, adaylar, dogrulama, bilgi)
+        _not(f"     · {_eklendi} görsel alındı "
+             f"({len(adaylar) - _eklendi} tanesi {en_kucuk}px altı, "
+             f"kopya ya da indirilemedi)")
         time.sleep(0.4)
 
     # Secilen katilikta hic sonuc cikmadiysa elenenlere geri donuyoruz.
@@ -928,6 +993,9 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
                           if not alan_yasakli(o.get("sayfa", ""))]
 
         esik = {"siki": 2, "orta": 4, "gevsek": 10 ** 6}[katilik]
+        _not(f"Sayfalardan görsel çıkmadı — Google'ın görsellerine düşülüyor "
+             f"({len(google_sonuclari)} aday, {katilik} modda ilk {esik} sıra "
+             f"+ kodu doğrulananlar kabul)")
         onaylanan = []
         for sira_no, oge in enumerate(temiz_sonuclar):
             etiket = google_sonucunu_dogrula(oge, kod)
@@ -960,6 +1028,7 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
             })
 
     kullanilan = sorted({k["alan"] for k in kayitlar})
+    _not(f"**SONUÇ: {len(kayitlar)} görsel**")
     if not kayitlar:
         if google_sonuclari:
             neden = ("arama sonuç verdi ama hiçbiri bu ürüne uymadı ya da "
@@ -1095,6 +1164,13 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     katilik = {"Sıkı": "siki", "Orta": "orta", "Gevşek": "gevsek"}[katilik_adi]
+
+    st.divider()
+    teshis_acik = st.checkbox(
+        "Teşhis modu", value=False,
+        help="Her ürün için hangi sorguların denendiğini, hangi sayfaların "
+             "gezildiğini ve görsellerin neden elendiğini gösterir. "
+             "Arama davranışını DEĞİŞTİRMEZ, sadece olan biteni yazar.")
 
     st.divider()
     st.caption("Sonuç gelmiyorsa: ürün sayfasının linkini doğrudan yapıştırın, "
@@ -1319,10 +1395,11 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
                                          urun.get("renk")) if x)
                  or urun.get("ad") or "ürün")
         ilerleme.progress(sira / len(satirlar), text=f"Aranıyor: {sorgu}")
+        _defter = [] if teshis_acik else None
         try:
             _ik = (_sadelestir(urun.get("marka", "")), _sadelestir(urun.get("kod", "")))
             kayitlar, alanlar, hata, kullanilan = urun_gorselleri(
-                urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik,
+                urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik, teshis=_defter,
                 renk_gerekli=_kod_sayaci.get(_ik, 1) > 1)
         except Exception as sorun:
             # Bir urunde beklenmedik hata cikarsa listenin geri kalani dursun
@@ -1331,7 +1408,8 @@ if st.button("Görselleri bul", type="primary", use_container_width=True,
         # Indirilen dosyalarin adi: eski malzeme no varsa o, yoksa urun kodu
         _taban = (urun.get("dosya_adi") or "").strip() or (urun.get("kod") or "").strip()
         _taban = re.sub(r"[^A-Za-z0-9._-]+", "_", _taban).strip("._-") or "urun"
-        tum_sonuclar.append((sorgu, kayitlar, alanlar, hata, kullanilan, _taban))
+        tum_sonuclar.append((sorgu, kayitlar, alanlar, hata, kullanilan, _taban,
+                             _defter))
 
     ilerleme.progress(1.0, text="Bitti")
     ilerleme.empty()
@@ -1360,10 +1438,17 @@ if st.session_state.get("kredi") and google_var_mi():
 # hata veriyordu. Basit bir sayac bunu tamamen ortadan kaldiriyor.
 _dugme_no = 0
 
-for sorgu, kayitlar, alanlar, hata, kullanilan, taban in st.session_state.get("sonuclar", []):
+for _satir in st.session_state.get("sonuclar", []):
+    # Eski oturumlarda defter alani olmayabilir
+    sorgu, kayitlar, alanlar, hata, kullanilan, taban = _satir[:6]
+    defter = _satir[6] if len(_satir) > 6 else None
     st.subheader(sorgu)
     if kullanilan and kullanilan.strip() != sorgu.strip():
         st.caption(f"Aramada kullanılan: `{kullanilan}`")
+
+    if defter:
+        with st.expander("🔍 Teşhis — ne oldu?", expanded=not kayitlar):
+            st.markdown("\n\n".join(defter))
 
     if hata:
         st.error(f"{sorgu} — {hata}")
@@ -1472,11 +1557,12 @@ for sorgu, kayitlar, alanlar, hata, kullanilan, taban in st.session_state.get("s
 
 # --- Hepsini birden indir ---
 sonuclar = st.session_state.get("sonuclar", [])
-toplam = sum(len(k) for _, k, _, _, _, _ in sonuclar)
+toplam = sum(len(_s[1]) for _s in sonuclar)
 if toplam:
     tampon = io.BytesIO()
     with zipfile.ZipFile(tampon, "w", zipfile.ZIP_DEFLATED) as arsiv:
-        for sorgu, kayitlar, _, _, _, taban in sonuclar:
+        for _s in sonuclar:
+            sorgu, kayitlar, taban = _s[0], _s[1], _s[5]
             for i, kayit in enumerate(kayitlar, 1):
                 arsiv.writestr(f"{taban}/{taban}_{i:02d}{kayit['uzanti']}",
                                kayit["bayt"])
