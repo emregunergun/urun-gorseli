@@ -7,6 +7,7 @@ Erisim ortak bir sifre ile korunur. Sifre kodun icinde degil, Streamlit'in
 "Secrets" bolumunde saklanir.
 """
 
+import colorsys
 import hashlib
 import hmac
 import io
@@ -436,6 +437,87 @@ def renge_gore_ayikla(adaylar, renk):
     if not uygun and not notr:
         return adaylar, 0            # hepsi elenecekti, dokunma
     return uygun + notr, elenen
+
+
+# --- Gorselden renk tespiti -------------------------------------------------
+# Bircok magaza dosya adina renk yazmiyor (ayjeshop gibi). O zaman tek
+# guvenilir kaynak gorselin kendisi: pikselleri okuyup urunun rengini
+# tahmin ediyoruz. Yalniz "emin olunabilen" renklerde karar veriyoruz;
+# bej/kahverengi/gri ten rengine cok benzedigi icin onlara hic karismiyoruz.
+def _hue_ailesi(h):
+    """0-360 arasi ton degerini renk ailesine cevirir."""
+    if h < 15 or h >= 345:
+        return "kirmizi"
+    if h < 45:
+        return "turuncu"
+    if h < 70:
+        return "sari"
+    if h < 170:
+        return "yesil"
+    if h < 260:
+        return "mavi"
+    if h < 290:
+        return "mor"
+    return "pembe"
+
+
+def gorselin_rengi(bayt):
+    """Gorseldeki urunun CANLI rengini tahmin eder; yoksa None doner.
+
+    Sadece doygun (canli) renkleri tespit ediyoruz - kirmizi, mavi, yesil...
+    Siyahi kasitli olarak ARAMIYORUZ: modelin sacI, golgeler ve koyu zeminler
+    de koyu piksel uretiyor, ayirt etmek guvenilir degil. Buna ihtiyac da yok:
+    "Siyah" istenen bir uruncun fotografi kipkirmizi cikiyorsa, kirmiziyi
+    gormemiz elemek icin yeterli.
+
+    Ten rengi ve stüdyo zemini doygunluk esiginin altinda kaldigi icin
+    urun sayilmiyor (HSV doygunlugu: ten ~0.30, canli kumas ~0.75).
+    """
+    try:
+        with Image.open(io.BytesIO(bayt)) as gorsel:
+            kucuk = gorsel.convert("RGB")
+            kucuk.thumbnail((160, 160), Image.BILINEAR)
+            pikseller = list(kucuk.getdata())
+    except Exception:
+        return None
+    if not pikseller:
+        return None
+
+    sayilan = 0
+    canli = {}
+    for kirmizi, yesil, mavi in pikseller:
+        ton, doygunluk, parlaklik = colorsys.rgb_to_hsv(
+            kirmizi / 255, yesil / 255, mavi / 255)
+        # Stüdyo zemini: cok acik ve soluk
+        if parlaklik > 0.90 and doygunluk < 0.18:
+            continue
+        sayilan += 1
+        if doygunluk >= 0.45 and parlaklik >= 0.25:
+            aile = _hue_ailesi(ton * 360)
+            canli[aile] = canli.get(aile, 0) + 1
+
+    if sayilan < len(pikseller) * 0.05 or not canli:
+        return None
+    aile, adet = max(canli.items(), key=lambda x: x[1])
+    # Gorselin anlamli bir bolumunu kaplamiyorsa karar vermiyoruz
+    return aile if adet / sayilan >= 0.05 else None
+
+
+# Turkce karakterler renk adlarinda cok geciyor (Kirmizi, Yesil, Sari).
+# _sadelestir bunlari atiyor ("kirmizi" -> "krmz"), o yuzden renk
+# karsilastirmasinda once Latin harflere ceviriyoruz.
+_RENK_HARF = str.maketrans("ğĞüÜşŞıİöÖçÇâÂîÎûÛ", "gGuUsSiIoOcCaAiIuU")
+
+
+def renk_ailesi_adi(renk):
+    """Excel'deki renk metnini bir renk ailesine cevirir; bilinmezse None."""
+    sade = _sadelestir((renk or "").translate(_RENK_HARF))
+    if not sade:
+        return None
+    for grup in RENK_SOZLUGU:
+        if any(k in sade for k in grup):
+            return grup[0]
+    return None
 
 
 def urun_sayfasi_mi(corba):
@@ -1124,9 +1206,15 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
     yedekler = []          # dogrulamayi gecemeyen ama gorsel iceren sayfalar
     kullanilan_site = 0
 
+    _istenen_aile = renk_ailesi_adi(renk)
+
     def sayfadan_topla(alan, adres, adaylar, dogrulama, bilgi):
         """Bir sayfanin gorsellerini indirip kayitlara ekler."""
         eklenen = 0
+        # Rengi tutmayanlar bir kenara ayriliyor. Sayfadan hicbir gorsel
+        # gecemezse bunlari geri aliyoruz - yanlis renk gostermek, hic
+        # gorsel gostermemekten iyi; ekip zaten gozle bakip seciyor.
+        elenen_renk = []
         for gorsel_url in adaylar:
             if len(kayitlar) >= kac_gorsel:
                 break
@@ -1138,11 +1226,34 @@ def urun_gorselleri(urun, kac_gorsel, kac_site, en_kucuk, oturum, katilik="orta"
             if imza in imzalar:
                 continue
             imzalar.add(imza)
+            kayit = {"bayt": bayt, "gen": gen, "yuk": yuk,
+                     "alan": alan, "uzanti": uzanti, "kaynak": adres,
+                     "dogrulama": "link" if link_verildi else dogrulama,
+                     "bilgi": bilgi}
+            # Gorselin kendi pikselleri istenen renkle celisiyorsa ayiriyoruz.
+            # Yalnizca CANLI bir renk tespit edilebildiginde karar veriyoruz;
+            # siyah/bej gibi durumlarda gorsel_aile None gelir ve dokunulmaz.
+            if _istenen_aile:
+                gorsel_aile = gorselin_rengi(bayt)
+                if gorsel_aile and gorsel_aile != _istenen_aile:
+                    kayit["gorsel_renk"] = gorsel_aile
+                    elenen_renk.append(kayit)
+                    continue
             eklenen += 1
-            kayitlar.append({"bayt": bayt, "gen": gen, "yuk": yuk,
-                             "alan": alan, "uzanti": uzanti, "kaynak": adres,
-                             "dogrulama": "link" if link_verildi else dogrulama,
-                             "bilgi": bilgi})
+            kayitlar.append(kayit)
+
+        if not eklenen and elenen_renk:
+            _not(f"     · {len(elenen_renk)} görselin rengi tutmadı ama başka "
+                 f"görsel kalmadığı için yine de gösteriliyor")
+            for kayit in elenen_renk:
+                if len(kayitlar) >= kac_gorsel:
+                    break
+                eklenen += 1
+                kayitlar.append(kayit)
+        elif elenen_renk:
+            _not(f"     · {len(elenen_renk)} görsel renk uymadığı için elendi "
+                 f"(istenen: {renk}, görselde: "
+                 f"{', '.join(sorted({k['gorsel_renk'] for k in elenen_renk}))})")
         return eklenen
 
     for alan, adres in aday_sayfalar:
