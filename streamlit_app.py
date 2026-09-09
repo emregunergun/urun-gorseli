@@ -49,9 +49,13 @@ def girisi_kontrol_et() -> bool:
         # Zamanlama saldirilarina karsi sabit sureli karsilastirma
         if hmac.compare_digest(sifre, dogru):
             st.session_state["giris_yapildi"] = True
-            st.rerun()
-        else:
-            st.error("Şifre yanlış.")
+            # st.rerun() KULLANMIYORUZ. Rerun, sunucuyla fazladan bir tur
+            # daha konusmak demek; kurumsal vekil sunucularin ardinda bu tur
+            # kopabiliyor ve ekran bos kaliyordu. Form gonderimi zaten yeni
+            # bir calisma baslattigi icin dogrudan True donup ayni calismada
+            # uygulamayi aciyoruz - bir tur daha az, bir kopma noktasi daha az.
+            return True
+        st.error("Şifre yanlış.")
 
     return False
 
