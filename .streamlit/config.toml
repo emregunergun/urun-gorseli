@@ -1,0 +1,10 @@
+[server]
+# Kurumsal aglarda vekil sunucular (proxy) cerezleri siyirip
+# WebSocket el sikismasini bozabiliyor. Bu iki koruma acikken baglanti
+# kurulamiyor ve sayfa gri iskelet halinde takili kaliyor.
+# Streamlit'in kendi sablonu da yerel calistirmada bunlari kapatiyor.
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false
