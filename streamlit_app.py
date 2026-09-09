@@ -28,10 +28,36 @@ st.set_page_config(page_title="Ürün Görseli Bul", page_icon="🔎", layout="w
 # ----------------------------------------------------------------------------
 # Sifre kapisi
 # ----------------------------------------------------------------------------
+def _giris_jetonu() -> str:
+    """Sifreden turetilen kisa bir jeton. Sifrenin kendisi degil, ozeti."""
+    dogru = str(st.secrets.get("sifre", "") or "")
+    if not dogru:
+        return ""
+    return hashlib.sha256(("urun-gorseli|" + dogru).encode()).hexdigest()[:20]
+
+
 def girisi_kontrol_et() -> bool:
     """Dogru sifre girilmeden uygulamanin geri kalani calismaz."""
     if st.session_state.get("giris_yapildi"):
         return True
+
+    # Kurumsal aglarda baglanti kopup yeniden kuruluyor; her kopusta Streamlit
+    # YENI bir oturum aciyor ve sifre yeniden soruluyordu. Giris bilgisini
+    # oturuma degil ADRESE bagliyoruz: tarayici adresi koruduğu icin baglanti
+    # koptugunda da giris ayakta kaliyor. Adreste sifre degil, sifreden
+    # turetilmis bir jeton duruyor.
+    _jeton = _giris_jetonu()
+    if _jeton:
+        try:
+            _gelen = st.query_params.get("g")
+            # Streamlit surumune gore duz metin ya da liste gelebiliyor
+            if isinstance(_gelen, (list, tuple)):
+                _gelen = _gelen[0] if _gelen else ""
+            if _gelen and str(_gelen) == _jeton:
+                st.session_state["giris_yapildi"] = True
+                return True
+        except Exception:
+            pass
 
     st.title("Ürün Görseli Bul")
     st.caption("Devam etmek için ekip şifresini girin.")
@@ -49,6 +75,11 @@ def girisi_kontrol_et() -> bool:
         # Zamanlama saldirilarina karsi sabit sureli karsilastirma
         if hmac.compare_digest(sifre, dogru):
             st.session_state["giris_yapildi"] = True
+            if _jeton:
+                try:
+                    st.query_params["g"] = _jeton
+                except Exception:
+                    pass
             # st.rerun() KULLANMIYORUZ. Rerun, sunucuyla fazladan bir tur
             # daha konusmak demek; kurumsal vekil sunucularin ardinda bu tur
             # kopabiliyor ve ekran bos kaliyordu. Form gonderimi zaten yeni
